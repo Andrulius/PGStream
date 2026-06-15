@@ -1,0 +1,18 @@
+* text=auto
+
+*.cpp text eol=lf
+*.h text eol=lf
+*.js text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.md text eol=lf
+*.ps1 text eol=crlf
+*.cmake text eol=lf
+CMakeLists.txt text eol=lf
+CMakePresets.json text eol=lf
+
+*.png binary
+*.vst3 binary
+*.lib binary
+*.obj binary
+*.pdb binary

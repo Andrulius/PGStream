@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pigeon Stream</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="shell">
+    <section class="top">
+      <img class="logo" src="/pgs.png" alt="Pigeon Stream">
+      <div class="title">
+        <h1>Pigeon Stream</h1>
+        <p>LAN master-bus monitor</p>
+      </div>
+      <div class="actions">
+        <button id="startButton" type="button">Start Audio</button>
+        <button id="nerdButton" class="secondary" type="button" aria-expanded="false">Nerd</button>
+      </div>
+    </section>
+
+    <section class="grid main-metrics">
+      <div class="metric">
+        <span>Status</span>
+        <strong id="connection">stopped</strong>
+      </div>
+      <div class="metric">
+        <span>Format</span>
+        <strong id="format">-</strong>
+      </div>
+      <div class="metric">
+        <span>Stream rate</span>
+        <strong id="sampleRate">-</strong>
+      </div>
+      <div class="metric">
+        <span>Client buffer</span>
+        <strong id="bufferFill">0 ms</strong>
+      </div>
+    </section>
+
+    <section id="nerdPanel" class="nerd" hidden>
+      <div class="nerd-group">
+        <h2>Client</h2>
+        <div class="grid">
+          <div class="metric">
+            <span>Stream sample rate</span>
+            <strong id="nerdStreamRate">-</strong>
+          </div>
+          <div class="metric">
+            <span>AudioContext sample rate</span>
+            <strong id="audioContextRate">-</strong>
+          </div>
+          <div class="metric">
+            <span>Format</span>
+            <strong id="nerdFormat">-</strong>
+          </div>
+          <div class="metric">
+            <span>Client buffer fill</span>
+            <strong id="clientBufferFillMs">0 ms</strong>
+          </div>
+          <div class="metric">
+            <span>Packets/s</span>
+            <strong id="packetsPerSecond">0</strong>
+          </div>
+          <div class="metric">
+            <span>Client sequence gaps</span>
+            <strong id="clientSequenceGaps">0</strong>
+          </div>
+          <div class="metric">
+            <span>Client AudioWorklet underruns</span>
+            <strong id="clientWorkletUnderruns">0</strong>
+          </div>
+          <div class="metric">
+            <span>WebSocket state</span>
+            <strong id="webSocketState">closed</strong>
+          </div>
+          <div class="metric">
+            <span>Received packets total</span>
+            <strong id="packetsTotal">0</strong>
+          </div>
+          <div class="metric">
+            <span>Decoded frames total</span>
+            <strong id="frames">0</strong>
+          </div>
+          <div class="metric">
+            <span>Resync count</span>
+            <strong id="resyncCount">0</strong>
+          </div>
+          <div class="metric">
+            <span>Last packet sequence</span>
+            <strong id="lastSequence">-</strong>
+          </div>
+        </div>
+      </div>
+
+      <div class="nerd-group server-nerd">
+        <h2>Server</h2>
+        <div class="grid">
+          <div class="metric">
+            <span>Server FIFO underruns</span>
+            <strong id="serverFifoUnderruns">0</strong>
+          </div>
+          <div class="metric">
+            <span>Network packets sent</span>
+            <strong id="networkPacketsSent">0</strong>
+          </div>
+          <div class="metric">
+            <span>WebSocket send failures</span>
+            <strong id="websocketSendFailures">0</strong>
+          </div>
+          <div class="metric">
+            <span>Connected clients</span>
+            <strong id="connectedClients">0</strong>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <p id="warning" class="warning">
+      This page is served over HTTPS with a self-signed certificate. Your browser may ask you to accept it before audio can start.
+    </p>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>
