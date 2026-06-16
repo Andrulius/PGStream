@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <utility>
 #include <vector>
 
 namespace pgstream
@@ -327,10 +328,112 @@ juce::Image makeQrImage(const juce::String& text)
 }
 }
 
-PGStreamAudioProcessorEditor::PGStreamAudioProcessorEditor(PGStreamAudioProcessor& owner)
-    : juce::AudioProcessorEditor(&owner), processor(owner)
+CircularTextButton::CircularTextButton(const juce::String& textToDraw)
+    : juce::Button(textToDraw), text(textToDraw)
 {
-    setSize(780, 620);
+    setWantsKeyboardFocus(false);
+}
+
+void CircularTextButton::paintButton(juce::Graphics& g, bool highlighted, bool down)
+{
+    const auto bounds = getLocalBounds().toFloat().reduced(1.0f);
+    auto fill = juce::Colour(0xff252b30);
+    if (highlighted)
+        fill = fill.brighter(0.12f);
+    if (down)
+        fill = fill.darker(0.12f);
+
+    g.setColour(fill);
+    g.fillEllipse(bounds);
+    g.setColour(juce::Colour(0xff8fd3ff));
+    g.drawEllipse(bounds, 1.4f);
+    g.setColour(juce::Colour(0xfff3f5f7));
+    g.setFont(juce::Font(text == "i" ? 15.0f : 13.0f, juce::Font::bold));
+    g.drawText(text, getLocalBounds(), juce::Justification::centred, false);
+}
+
+AboutPanel::AboutPanel(juce::Image popupLogo)
+    : logo(std::move(popupLogo))
+{
+    setWantsKeyboardFocus(true);
+    addAndMakeVisible(closeButton);
+    closeButton.onClick = [this]
+    {
+        if (onClose)
+            onClose();
+    };
+}
+
+void AboutPanel::paint(juce::Graphics& g)
+{
+    g.setColour(juce::Colour(0xcc000000));
+    g.fillAll();
+
+    const auto panel = getLocalBounds().reduced(34, 24).toFloat();
+    g.setColour(juce::Colour(0xff20252a));
+    g.fillRoundedRectangle(panel, 8.0f);
+    g.setColour(juce::Colour(0xff46535d));
+    g.drawRoundedRectangle(panel, 8.0f, 1.0f);
+
+    auto content = getLocalBounds().reduced(54, 42);
+    content.removeFromTop(6);
+
+    if (logo.isValid())
+    {
+        const auto logoArea = content.removeFromTop(142);
+        g.drawImageWithin(logo,
+                          logoArea.getCentreX() - 62,
+                          logoArea.getY(),
+                          124,
+                          124,
+                          juce::RectanglePlacement::centred | juce::RectanglePlacement::onlyReduceInSize);
+        content.removeFromTop(4);
+    }
+
+    g.setColour(juce::Colour(0xfff3f5f7));
+    g.setFont(juce::Font(22.0f, juce::Font::bold));
+    g.drawText("Pigeon Stream", content.removeFromTop(30), juce::Justification::centred);
+
+    g.setFont(juce::Font(14.0f));
+    g.setColour(juce::Colour(0xffd8e0e6));
+
+    const juce::String copyright = juce::String::fromUTF8("\xc2\xa9 2026 Arkadiusz Go\xc5\x82\xc4\x85b");
+    const juce::String description = "Transparent VST3 for streaming audio from the DAW master bus, "
+        "and other DAW buses if inserted there, to a browser over LAN.";
+    const juce::String text = juce::String("Version 0.3\n"
+        "Author: Aras Pigeon\n\n"
+    ) + description + "\n\n"
+        + copyright + "\n"
+        "https://github.com/Andrulius/PGStream\n"
+        "License: none";
+
+    g.drawFittedText(text, content.reduced(8, 0), juce::Justification::centredTop, 9);
+}
+
+void AboutPanel::resized()
+{
+    closeButton.setBounds(getWidth() - 68, 38, 26, 26);
+}
+
+bool AboutPanel::keyPressed(const juce::KeyPress& key)
+{
+    if (key.getKeyCode() == juce::KeyPress::escapeKey)
+    {
+        if (onClose)
+            onClose();
+        return true;
+    }
+
+    return false;
+}
+
+PGStreamAudioProcessorEditor::PGStreamAudioProcessorEditor(PGStreamAudioProcessor& owner)
+    : juce::AudioProcessorEditor(&owner),
+      processor(owner),
+      aboutPanel(juce::ImageFileFormat::loadFrom(PGStreamBinaryData::logo_png,
+                                                 static_cast<size_t> (PGStreamBinaryData::logo_pngSize)))
+{
+    setSize(600, 620);
     logoImage = juce::ImageFileFormat::loadFrom(PGStreamBinaryData::pgs_png,
                                                 static_cast<size_t> (PGStreamBinaryData::pgs_pngSize));
 
@@ -350,15 +453,19 @@ PGStreamAudioProcessorEditor::PGStreamAudioProcessorEditor(PGStreamAudioProcesso
     packetBox.addItem("60 ms", 3);
     packetBox.addItem("extr666me", 4);
 
-    bufferBox.addItem("20 ms", 5);
-    bufferBox.addItem("40 ms", 6);
-    bufferBox.addItem("60 ms", 7);
-    bufferBox.addItem("100 ms", 1);
-    bufferBox.addItem("250 ms", 2);
-    bufferBox.addItem("500 ms", 3);
-    bufferBox.addItem("1000 ms", 4);
+    const auto bufferChoices = bufferTargetChoiceLabels();
+    for (int i = 0; i < bufferChoices.size(); ++i)
+        bufferBox.addItem(bufferChoices[i], i + 1);
 
     addAndMakeVisible(enableStreamButton);
+    addAndMakeVisible(infoButton);
+    infoButton.onClick = [this]
+    {
+        aboutPanel.setVisible(true);
+        aboutPanel.toFront(true);
+        aboutPanel.grabKeyboardFocus();
+    };
+
     addLabeled(portLabel, portSlider, "Port");
     addLabeled(formatLabel, formatBox, "Format");
     addLabeled(sampleRateLabel, sampleRateBox, "Sample Rate");
@@ -393,6 +500,13 @@ PGStreamAudioProcessorEditor::PGStreamAudioProcessorEditor(PGStreamAudioProcesso
     certNoteLabel.setColour(juce::Label::textColourId, juce::Colour(0xfff0d7a7));
     certNoteLabel.setText("Browsers may need you to accept the embedded self-signed certificate.", juce::dontSendNotification);
 
+    addChildComponent(aboutPanel);
+    aboutPanel.onClose = [this]
+    {
+        aboutPanel.setVisible(false);
+        infoButton.grabKeyboardFocus();
+    };
+
     enableAttachment = std::make_unique<ButtonAttachment>(processor.parameters, ParamIDs::streamEnabled, enableStreamButton);
     portAttachment = std::make_unique<SliderAttachment>(processor.parameters, ParamIDs::httpsPort, portSlider);
     formatAttachment = std::make_unique<ComboBoxAttachment>(processor.parameters, ParamIDs::outputFormat, formatBox);
@@ -424,11 +538,11 @@ void PGStreamAudioProcessorEditor::paint(juce::Graphics& g)
     g.fillAll(juce::Colour(0xff181b1e));
     g.setColour(juce::Colour(0xfff3f5f7));
     g.setFont(juce::Font(24.0f, juce::Font::bold));
-    g.drawText("Pigeon Stream", 18, 14, getWidth() - 390, 32, juce::Justification::centredLeft);
+    g.drawText("Pigeon Stream", 18, 14, 210, 32, juce::Justification::centredLeft);
 
     g.setFont(juce::Font(13.0f));
     g.setColour(juce::Colour(0xffc7d0d8));
-    g.drawText("PGStream.vst3", 20, 48, getWidth() - 392, 22, juce::Justification::centredLeft);
+    g.drawText("PGStream.vst3", 20, 48, 190, 22, juce::Justification::centredLeft);
 
     if (logoImage.isValid())
     {
@@ -448,7 +562,8 @@ void PGStreamAudioProcessorEditor::resized()
     const auto logoSize = 160;
     const auto qrSizePx = 150;
     const auto logoX = topArea.getRight() - logoSize;
-    const auto qrX = logoX - 18 - qrSizePx;
+    const auto qrX = logoX - 14 - qrSizePx;
+    infoButton.setBounds(topArea.getX() + 2, topArea.getY() + 64, 24, 24);
     qrCodeImage.setBounds(qrX, topArea.getY(), qrSizePx, qrSizePx);
     qrCodeLabel.setBounds(qrX, qrCodeImage.getBottom() + 4, qrSizePx, 24);
 
@@ -501,6 +616,7 @@ void PGStreamAudioProcessorEditor::resized()
     }
 
     certNoteLabel.setBounds(area.removeFromTop(48));
+    aboutPanel.setBounds(getLocalBounds());
 }
 
 void PGStreamAudioProcessorEditor::timerCallback()

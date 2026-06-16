@@ -73,6 +73,7 @@ juce_add_binary_data(PGStreamAssets
         assets/web/app.js
         assets/web/audio-worklet.js
         assets/web/style.css
+        assets/logo.png
         assets/pgs.png
         assets/certs/dev-cert.pem
         assets/certs/dev-key.pem)

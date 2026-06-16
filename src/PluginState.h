@@ -17,5 +17,7 @@ static constexpr const char* keepAlive = "keepAliveWhenIdle";
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
+juce::StringArray bufferTargetChoiceLabels();
+int bufferTargetMsForIndex(int index);
 StreamConfig configFromState(const juce::AudioProcessorValueTreeState& state, double sessionSampleRate);
 }

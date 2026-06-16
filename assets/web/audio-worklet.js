@@ -9,7 +9,7 @@ class PGStreamPlayer extends AudioWorkletProcessor {
     this.targetBufferFrames = Math.floor(sampleRate * 0.5);
     this.criticalBufferFrames = Math.floor(sampleRate * 0.125);
     this.resumeBufferFrames = Math.floor(sampleRate * 0.375);
-    this.highWaterBufferFrames = Math.floor(sampleRate * 0.75);
+    this.maxBufferFrames = Math.floor(sampleRate * 0.75);
     this.capacityFrames = Math.max(4096, Math.floor(sampleRate * 2));
     this.buffer = new Float32Array(this.capacityFrames * 2);
     this.readFrame = 0;
@@ -35,22 +35,24 @@ class PGStreamPlayer extends AudioWorkletProcessor {
     this.bufferTargetMs = Math.max(20, Number(message.bufferTargetMs || 100));
 
     this.targetBufferFrames = Math.max(1, Math.floor(this.streamSampleRate * (this.bufferTargetMs / 1000)));
-    this.criticalBufferFrames = Math.max(
-      Math.floor(this.streamSampleRate * 0.01),
-      Math.floor(this.targetBufferFrames / 3)
+    const twentyMsFrames = Math.floor(this.streamSampleRate * 0.02);
+    const suggestedCriticalFrames = Math.max(
+      twentyMsFrames,
+      Math.floor(this.targetBufferFrames * 0.25)
     );
+    this.criticalBufferFrames = Math.max(1, Math.min(this.targetBufferFrames - 1, suggestedCriticalFrames));
     this.resumeBufferFrames = Math.max(
       this.criticalBufferFrames + 1,
       this.targetBufferFrames
     );
-    this.highWaterBufferFrames = this.targetBufferFrames + Math.max(
-      this.targetBufferFrames,
-      Math.floor(this.streamSampleRate * 0.04)
+    this.maxBufferFrames = Math.max(
+      this.targetBufferFrames * 2,
+      this.targetBufferFrames + Math.floor(this.streamSampleRate * 0.1)
     );
 
     const desiredFrames = Math.max(
       4096,
-      this.highWaterBufferFrames * 2
+      this.maxBufferFrames + Math.floor(this.streamSampleRate * 0.1)
     );
 
     if (desiredFrames !== this.capacityFrames) {
@@ -93,14 +95,18 @@ class PGStreamPlayer extends AudioWorkletProcessor {
 
     const interleaved = new Float32Array(samplesBuffer);
     const incomingFrames = Math.min(message.frameCount, Math.floor(interleaved.length / 2));
-    const queueLimit = Math.min(
-      this.capacityFrames,
-      Math.max(this.highWaterBufferFrames, this.targetBufferFrames + incomingFrames, incomingFrames * 2)
-    );
-    const overflow = Math.max(0, this.framesQueued + incomingFrames - queueLimit);
-    if (overflow > 0) {
-      this.readFrame = (this.readFrame + overflow) % this.capacityFrames;
-      this.framesQueued -= overflow;
+    const queueLimit = Math.min(this.capacityFrames, Math.max(this.maxBufferFrames, incomingFrames));
+
+    if (this.framesQueued + incomingFrames > queueLimit) {
+      const desiredQueuedBeforeWrite = Math.max(
+        0,
+        Math.min(this.targetBufferFrames, queueLimit - incomingFrames)
+      );
+      const framesToDrop = Math.max(0, this.framesQueued - desiredQueuedBeforeWrite);
+      if (framesToDrop > 0) {
+        this.readFrame = (this.readFrame + framesToDrop) % this.capacityFrames;
+        this.framesQueued -= framesToDrop;
+      }
     }
 
     for (let frame = 0; frame < incomingFrames; ++frame) {
@@ -181,8 +187,6 @@ class PGStreamPlayer extends AudioWorkletProcessor {
 
       if (i < left.length) {
         this.fillSilence(left, right, i);
-      } else if (this.framesQueued <= this.criticalBufferFrames) {
-        this.enterResync();
       }
     }
 

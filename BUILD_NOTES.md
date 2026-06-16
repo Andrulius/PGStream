@@ -72,6 +72,48 @@ FIFO polling is not treated as an underrun when there are simply not enough fram
 
 Browser buffer targets are 20, 40, 60, 100, 250, 500, and 1000 ms. The AudioWorklet starts playback after the selected target is buffered, resyncs back to that target after starvation, and trims excess queued audio so latency does not silently drift toward seconds unless a large target is selected.
 
+## 2026-06-16 Polish and Buffer Fix Pass
+
+Changed:
+
+- Compacted the plugin editor header from a 780 px-wide layout to a 600 px content-driven layout. The title/info area now sits close to the QR code and `pgs.png` logo with fixed, clean spacing instead of a large flexible gap.
+- Added a small circular `i` button near the title and an in-editor About panel with a circular `X` close button.
+- Embedded and displayed the existing `assets/logo.png` image at the top of the About panel. `assets/pgs.png` remains unchanged and is still used for the normal editor/browser logo.
+- Rebuilt the buffer target choices around one ordered source of truth: 20, 40, 60, 100, 250, 500, and 1000 ms. The GUI choice, stored parameter index, `StreamConfig`, `/info` metadata, browser setup, and AudioWorklet target now resolve to the same millisecond value.
+- Adjusted the AudioWorklet queue logic so normal low-buffer variation does not trigger periodic resync. Resync now represents true queue starvation, while excess queued audio is trimmed back toward the selected target instead of being allowed to drift or being dropped below target.
+
+Deliberately not changed:
+
+- DAW audio pass-through and `processBlock`.
+- The network worker packet accumulator, WSS frame format, and current packetization behavior.
+- HTTPS/WSS, CivetWeb, QR generation, LAN IP selection, server start/stop behavior, and Nerd diagnostics.
+- VST3 identity, bundle naming, build system architecture, and install/copy behavior outside the project.
+
+Preserved behavior:
+
+- Server remains disabled by default for DAW scan safety.
+- Normal mode still sends complete aggregated packets, with 20 ms as the default packet duration.
+- Browser playback remains plain HTML/CSS/JS plus AudioWorklet, without Node, npm, React, Electron, WebRTC, or helper daemons.
+
+Files added:
+
+- No new source files were created by this pass.
+- The pre-existing local `assets/logo.png` asset is now referenced by the build and must be tracked with the project for clean rebuilds on other machines.
+
+Files removed:
+
+- None.
+
+Validation performed:
+
+- Confirmed `processBlock` and the network packet accumulator were not edited.
+- Confirmed `assets/logo.png` is included in `juce_add_binary_data` and loaded by the About panel through `PGStreamBinaryData`.
+- Confirmed the buffer target flow is `AudioParameterChoice` index -> `bufferTargetMsForIndex()` -> `StreamConfig.bufferTargetMs` -> `/info` metadata -> browser `configure` message -> AudioWorklet target frames.
+- Ran `scripts\bootstrap_windows.ps1` with GitHub Desktop Git added to `PATH`. It downloaded project-local CMake 4.3.3 under `tools\`, then stopped because no Visual Studio C++ toolchain was found.
+- Ran `scripts\build_release_windows.ps1` with GitHub Desktop Git added to `PATH`; it stopped while generating certificates because OpenSSL was not found in this session.
+- Ran `scripts\verify_artifact_windows.ps1`; it failed because `dist\PGStream.vst3` and `PGStream.vst3` do not exist yet.
+- Build and DAW visibility audit were not completed on this machine because `cl.exe`, `vswhere.exe`, and `winget` were not available in this session.
+
 ## LAN URL and QR
 
 The server binds broadly for LAN reachability, while the displayed URL and QR code use a ranked local IPv4 selection:

@@ -1,7 +1,28 @@
 #include "PluginState.h"
+#include <array>
 
 namespace pgstream
 {
+namespace
+{
+constexpr std::array<int, 7> bufferTargetValuesMs { 20, 40, 60, 100, 250, 500, 1000 };
+}
+
+juce::StringArray bufferTargetChoiceLabels()
+{
+    juce::StringArray labels;
+    for (const auto targetMs : bufferTargetValuesMs)
+        labels.add(juce::String(targetMs) + " ms");
+
+    return labels;
+}
+
+int bufferTargetMsForIndex(int index)
+{
+    const auto safeIndex = juce::jlimit(0, static_cast<int> (bufferTargetValuesMs.size()) - 1, index);
+    return bufferTargetValuesMs[static_cast<size_t> (safeIndex)];
+}
+
 juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
 {
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> params;
@@ -26,7 +47,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
 
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID { ParamIDs::bufferTarget, 1 }, "Buffer Target",
-        juce::StringArray { "100", "250", "500", "1000", "20", "40", "60" }, 0));
+        bufferTargetChoiceLabels(), 3));
 
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID { ParamIDs::keepAlive, 1 }, "Keep Alive When Idle", true));
@@ -65,8 +86,7 @@ StreamConfig configFromState(const juce::AudioProcessorValueTreeState& state, do
         config.packetDurationMode = PacketDurationMode::ms20;
 
     const auto bufferIndex = static_cast<int> (state.getRawParameterValue(ParamIDs::bufferTarget)->load());
-    static constexpr int targets[] = { 100, 250, 500, 1000, 20, 40, 60 };
-    config.bufferTargetMs = targets[juce::jlimit(0, 6, bufferIndex)];
+    config.bufferTargetMs = bufferTargetMsForIndex(bufferIndex);
 
     return config;
 }

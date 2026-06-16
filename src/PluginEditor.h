@@ -2,9 +2,35 @@
 
 #include "PluginProcessor.h"
 #include <juce_gui_extra/juce_gui_extra.h>
+#include <functional>
 
 namespace pgstream
 {
+class CircularTextButton final : public juce::Button
+{
+public:
+    explicit CircularTextButton(const juce::String& textToDraw);
+    void paintButton(juce::Graphics&, bool shouldDrawButtonAsHighlighted, bool shouldDrawButtonAsDown) override;
+
+private:
+    juce::String text;
+};
+
+class AboutPanel final : public juce::Component
+{
+public:
+    explicit AboutPanel(juce::Image popupLogo);
+
+    std::function<void()> onClose;
+    void paint(juce::Graphics&) override;
+    void resized() override;
+    bool keyPressed(const juce::KeyPress& key) override;
+
+private:
+    juce::Image logo;
+    CircularTextButton closeButton { "X" };
+};
+
 class PGStreamAudioProcessorEditor final : public juce::AudioProcessorEditor,
                                            private juce::Timer
 {
@@ -22,6 +48,7 @@ private:
     PGStreamAudioProcessor& processor;
 
     juce::ToggleButton enableStreamButton { "Enable Stream" };
+    CircularTextButton infoButton { "i" };
     juce::Slider portSlider;
     juce::ComboBox formatBox;
     juce::ComboBox sampleRateBox;
@@ -45,6 +72,7 @@ private:
     juce::ImageComponent qrCodeImage;
     juce::Label qrCodeLabel;
     juce::String qrCodeUrl;
+    AboutPanel aboutPanel;
 
     using ButtonAttachment = juce::AudioProcessorValueTreeState::ButtonAttachment;
     using SliderAttachment = juce::AudioProcessorValueTreeState::SliderAttachment;
