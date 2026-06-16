@@ -1,6 +1,6 @@
 build/
 dist/
-PGStream.vst3/
+# Keep the root VST3 bundle tracked as the distributable artifact.
 external/
 tools/
 !tools/.gitkeep

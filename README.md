@@ -41,7 +41,7 @@ The complete VST3 bundles are copied to:
 .\PGStream.vst3
 ```
 
-Build artefacts and generated VST3 bundles are not committed to the repository.
+The root `.\PGStream.vst3` bundle is committed as the distributable VST3 artefact. The duplicate `.\dist\PGStream.vst3` build output remains local and ignored.
 
 Copy the whole `PGStream.vst3` folder, not only `Contents\x86_64-win\PGStream.vst3`.
 
@@ -150,9 +150,9 @@ Unstable Wi-Fi may still require a larger browser buffer target such as 250, 500
 
 ## Repository Contents
 
-The public repository contains source code, web assets, build scripts, and documentation. It intentionally does not commit:
+The public repository contains source code, web assets, build scripts, documentation, and the root `PGStream.vst3` distributable bundle. It intentionally does not commit:
 
-- generated VST3 bundles
+- duplicate `dist` VST3 output
 - build directories
 - downloaded JUCE/CivetWeb/CMake dependencies
 - generated development TLS private keys or certificates

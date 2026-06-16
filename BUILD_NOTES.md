@@ -4,7 +4,7 @@ PGStream is a native Windows x64 VST3 built with JUCE, CMake, CivetWeb, and Open
 
 ## Source Dependencies
 
-The repository does not vendor JUCE, CivetWeb, CMake, generated certificates, build folders, or VST3 artefacts. Run the bootstrap script to fetch pinned dependencies and generate local development certificates:
+The repository does not vendor JUCE, CivetWeb, CMake, generated certificates, build folders, or duplicate `dist` artefacts. The root `PGStream.vst3` bundle is tracked as the distributable VST3 artefact. Run the bootstrap script to fetch pinned dependencies and generate local development certificates:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap_windows.ps1
