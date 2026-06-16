@@ -446,45 +446,47 @@ int NetworkServer::handleHttpRequest(mg_connection* connection)
         localConfig.sessionSampleRate = sessionSampleRate.load(std::memory_order_acquire);
         const auto stats = getStats();
 
-        const auto json = juce::String("{\"name\":\"PGStream\",\"format\":\"")
-            + localConfig.formatName()
-            + "\",\"formatCode\":"
-            + juce::String(static_cast<int> (localConfig.outputFormat))
-            + ",\"sampleRate\":"
-            + juce::String(localConfig.targetSampleRate())
-            + ",\"channels\":2,\"bufferTargetMs\":"
-            + juce::String(localConfig.bufferTargetMs)
-            + ",\"packetDurationMs\":"
-            + juce::String(localConfig.packetDurationMs())
-            + ",\"packetMode\":"
-            + jsonString(localConfig.packetModeName())
-            + ",\"server\":{\"serverFifoUnderruns\":"
-            + juce::String(stats.serverFifoUnderruns)
-            + ",\"networkPacketsSent\":"
-            + juce::String(stats.networkPacketsSent)
-            + ",\"websocketSendFailures\":"
-            + juce::String(stats.websocketSendFailures)
-            + ",\"connectedClients\":"
-            + juce::String(stats.connectedClients)
-            + ",\"currentLanIp\":"
-            + jsonString(stats.currentLanIp)
-            + ",\"listenAddress\":"
-            + jsonString(stats.listenAddress)
-            + ",\"port\":"
-            + juce::String(stats.port)
-            + ",\"streamFormat\":"
-            + jsonString(stats.streamFormat)
-            + ",\"streamSampleRate\":"
-            + juce::String(stats.streamSampleRate)
-            + ",\"framesSent\":"
-            + juce::String(stats.framesSent)
-            + ",\"status\":"
-            + jsonString(stats.statusText)
-            + ",\"lanUrl\":"
-            + jsonString(stats.lanUrl)
-            + ",\"candidateLanUrls\":"
-            + jsonStringArray(stats.candidateLanUrls)
-            + "}}";
+        juce::String json;
+        json.preallocateBytes(1024);
+        json += "{\"name\":\"PGStream\",\"format\":\"";
+        json += localConfig.formatName();
+        json += "\",\"formatCode\":";
+        json += juce::String(static_cast<int> (localConfig.outputFormat));
+        json += ",\"sampleRate\":";
+        json += juce::String(localConfig.targetSampleRate());
+        json += ",\"channels\":2,\"bufferTargetMs\":";
+        json += juce::String(localConfig.bufferTargetMs);
+        json += ",\"packetDurationMs\":";
+        json += juce::String(localConfig.packetDurationMs());
+        json += ",\"packetMode\":";
+        json += jsonString(localConfig.packetModeName());
+        json += ",\"server\":{\"serverFifoUnderruns\":";
+        json += juce::String(stats.serverFifoUnderruns);
+        json += ",\"networkPacketsSent\":";
+        json += juce::String(stats.networkPacketsSent);
+        json += ",\"websocketSendFailures\":";
+        json += juce::String(stats.websocketSendFailures);
+        json += ",\"connectedClients\":";
+        json += juce::String(stats.connectedClients);
+        json += ",\"currentLanIp\":";
+        json += jsonString(stats.currentLanIp);
+        json += ",\"listenAddress\":";
+        json += jsonString(stats.listenAddress);
+        json += ",\"port\":";
+        json += juce::String(stats.port);
+        json += ",\"streamFormat\":";
+        json += jsonString(stats.streamFormat);
+        json += ",\"streamSampleRate\":";
+        json += juce::String(stats.streamSampleRate);
+        json += ",\"framesSent\":";
+        json += juce::String(stats.framesSent);
+        json += ",\"status\":";
+        json += jsonString(stats.statusText);
+        json += ",\"lanUrl\":";
+        json += jsonString(stats.lanUrl);
+        json += ",\"candidateLanUrls\":";
+        json += jsonStringArray(stats.candidateLanUrls);
+        json += "}}";
 
         mg_send_http_ok(connection, "application/json; charset=utf-8", json.getNumBytesAsUTF8());
         mg_write(connection, json.toRawUTF8(), json.getNumBytesAsUTF8());

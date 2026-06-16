@@ -397,7 +397,7 @@ void AboutPanel::paint(juce::Graphics& g)
     g.setFont(juce::Font(14.0f));
     g.setColour(juce::Colour(0xffd8e0e6));
 
-    const juce::String copyright = juce::String::fromUTF8("\xc2\xa9 2026 Arkadiusz Go\xc5\x82\xc4\x85b");
+    const juce::String copyright = juce::String::fromUTF8("\xc2\xa9 2026 Arkadiusz Go\xc5\x82\xc4\x85" "b");
     const juce::String description = "Transparent VST3 for streaming audio from the DAW master bus, "
         "and other DAW buses if inserted there, to a browser over LAN.";
     const juce::String text = juce::String("Version 0.3\n"
