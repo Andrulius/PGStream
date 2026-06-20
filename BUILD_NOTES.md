@@ -1,10 +1,10 @@
 # Build Notes
 
-PGStream is a native Windows x64 VST3 built with JUCE, CMake, CivetWeb, OpenSSL, Opus, and libdatachannel. The project is designed so the DAW audio path remains transparent while browser streaming runs on a separate non-realtime network worker.
+PGStream is a native Windows x64 VST3 built with JUCE, CMake, CivetWeb, Mbed TLS, Opus, and libdatachannel. The project is designed so the DAW audio path remains transparent while browser streaming runs on a separate non-realtime network worker.
 
 ## Source Dependencies
 
-The repository does not vendor generated build folders or duplicate `dist` artefacts. The root `PGStream.vst3` bundle is tracked as the distributable VST3 artefact. Run the bootstrap script to fetch pinned dependencies and generate local development certificates:
+The repository does not vendor generated build folders or duplicate `dist` artefacts. The root `PGStream.vst3` bundle is tracked as the distributable VST3 artefact. Run the bootstrap script to fetch pinned dependencies:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap_windows.ps1
@@ -14,20 +14,18 @@ Pinned dependency versions:
 
 - JUCE: `8.0.13`
 - CivetWeb: `v1.16`
-- libdatachannel and Opus: built from the repository `external` tree used by CMake
+- Mbed TLS: `mbedtls-3.6.6`, commit `0bebf8b8c7f07abe3571ded48a11aa907a1ffb20`
+- libdatachannel: commit `a542d8703bfab42a5533852e18d6d1879e01080a`
+- Opus: commit `3da9f7a6db1c05c3996cb363a9d1931a978bf1be`
 - CMake: `4.3.3` project-local fallback when the system CMake is too old
 
-## TLS Strategy
+## LAN Transport And Crypto Backend
 
-PGStream serves the browser UI over HTTPS/WSS because browser AudioWorklet support on phones and LAN clients generally requires a secure context. The development certificate and private key are generated locally under `assets\certs` by `scripts\generate_dev_cert.ps1` and embedded into the plugin binary at build time.
+PGStream serves the browser UI over plain LAN HTTP and uses WS for WebRTC signaling and the legacy WebSocket fallback. Use it only on trusted local networks.
 
-Generated certificate files are intentionally ignored by git and must not be committed:
+libdatachannel is built with Mbed TLS as the WebRTC DTLS/TLS backend. The active build does not require local OpenSSL headers, libraries, executables, generated certificates, or private keys.
 
-- `assets\certs\dev-cert.pem`
-- `assets\certs\dev-key.pem`
-- `assets\certs\dev-cert.cnf`
-
-The self-signed certificate is expected to appear as not trusted until accepted by the browser or installed into a device trust store.
+PGStream adds one project-local Mbed TLS user config at `cmake\mbedtls_pgstream_config.h` to enable `MBEDTLS_SSL_DTLS_SRTP`, which libdatachannel requires for WebRTC SRTP profile negotiation.
 
 ## Safe Windows Build
 
@@ -61,19 +59,38 @@ The verification script checks:
 - `Contents\x86_64-win\PGStream.vst3` exists
 - the inner binary is Windows x64 PE
 - the bundle and inner binary names are consistent
-- OpenSSL is statically linked, with no `libssl` or `libcrypto` DLL dependency
+- no `libssl` or `libcrypto` DLL dependency is present
 
 `scripts\audit_windows_daw_visibility.ps1` is optional. It discovers validators, pluginval, and common DAWs, but may recursively scan `C:\Program Files` and `C:\Program Files (x86)`.
 
 ## Streaming Behavior
 
-The default browser transport is WebRTC Opus. WSS is used for SDP/ICE signaling, then Opus audio is sent as RTP media through libdatachannel. The browser creates a recvonly audio transceiver; the plugin answers with a sendonly Opus track. The sender must use the browser offer's audio MID and Opus RTP payload type, otherwise ICE/DTLS can appear connected while no usable audio media is paired to the browser track.
+The default browser transport is WebRTC Opus. WS is used for SDP/ICE signaling, then Opus audio is sent as RTP media through libdatachannel. The browser creates a recvonly audio transceiver; the plugin answers with a sendonly Opus track. The sender must use the browser offer's audio MID and Opus RTP payload type, otherwise ICE/DTLS can appear connected while no usable audio media is paired to the browser track.
 
-Legacy WebSocket fallback packetizes audio on the network worker into complete fixed-duration WSS frames. The default packet duration is 20 ms, with optional 40 ms and 60 ms modes. The experimental **extr666me** mode sends complete 5 ms packets and is not the default.
+Legacy WebSocket fallback packetizes audio on the network worker into complete fixed-duration WS frames. The default packet duration is 20 ms, with optional 40 ms and 60 ms modes. The experimental **extr666me** mode sends complete 5 ms packets and is not the default.
 
 FIFO polling is not treated as an underrun when there are simply not enough frames for a complete packet yet. Server FIFO underruns are reserved for real source starvation after the worker has waited/backed off. If keep-alive is enabled during real idle, full-size silence packets are sent at the selected packet duration.
 
 Browser buffer targets are 20, 40, 60, 100, 250, 500, and 1000 ms for the legacy fallback path. The AudioWorklet starts playback after the selected target is buffered, resyncs back to that target after starvation, and trims excess queued audio so latency does not silently drift toward seconds unless a large target is selected.
+
+## 2026-06-20 Public Release License Cleanup
+
+Changed:
+
+- Switched the embedded browser server to HTTP/WS and removed embedded development certificate handling from the active build.
+- Switched libdatachannel's WebRTC crypto backend to Mbed TLS 3.6.6 LTS.
+- Removed local OpenSSL discovery, certificate generation, and OpenSSL static library linkage from the CMake and release scripts.
+- Added AGPL-3.0-only licensing, `THIRD_PARTY_NOTICES.md`, and public-release documentation updates.
+- Updated the plugin About panel version from 0.3 to 0.4.
+
+Validation performed:
+
+- Configured `vs2026-x64-safe` with CMake.
+- Built `PGStream_VST3.vcxproj` in `Release|x64` using MSBuild `/m:1`, CMake/target parallelism limited to one, node reuse disabled, and the safe monitor active.
+- Peak observed compiler working set was about 660 MB; peak observed linker working set was about 261 MB.
+- Ran `scripts\verify_artifact_windows.ps1`: both `PGStream.vst3` and `dist\PGStream.vst3` passed bundle, JSON, x64 PE, naming, and dependency checks.
+- Confirmed `dumpbin /DEPENDENTS` reports no `libssl` or `libcrypto` DLL dependency.
+- Root artifact inner binary SHA256: `EAFABD2185EA50D4227054218B377331572E2A58109DEB3B2F30117D77592776`.
 
 ## 2026-06-20 WebRTC Opus and VS2026 Build Pass
 
@@ -89,13 +106,12 @@ Validation performed:
 
 - Built `PGStream_VST3.vcxproj` in `Release|x64` with MSBuild `/m:1`, `/MP` disabled in the generated project files, and no Visual Studio GUI.
 - Peak observed compiler working set during the all-in VST3 target build was about 623 MB.
-- Ran `scripts\verify_artifact_windows.ps1`: both `PGStream.vst3` and `dist\PGStream.vst3` passed bundle, JSON, x64 PE, naming, and OpenSSL dependency checks.
+- Ran `scripts\verify_artifact_windows.ps1`: both `PGStream.vst3` and `dist\PGStream.vst3` passed bundle, JSON, x64 PE, naming, and dependency checks.
 - Confirmed `dumpbin /DEPENDENTS` reports no `libssl` or `libcrypto` DLL dependency.
 
 Notes:
 
-- The installed `C:\Program Files\OpenSSL-Win64\include` tree is incomplete because it contains `openssl/configuration.h.in` but not generated `openssl/configuration.h`.
-- The successful build uses complete OpenSSL 1.1.1 headers from the VS2019 Miniconda install and statically links OpenSSL libraries from `OpenSSL-Win64`.
+- This pass predated the public-release cleanup. Current builds use Mbed TLS for libdatachannel and plain HTTP/WS for the embedded CivetWeb server.
 
 ## 2026-06-16 Polish and Buffer Fix Pass
 
@@ -110,8 +126,8 @@ Changed:
 Deliberately not changed:
 
 - DAW audio pass-through and `processBlock`.
-- The network worker packet accumulator, WSS frame format, and current packetization behavior.
-- HTTPS/WSS, CivetWeb, QR generation, LAN IP selection, server start/stop behavior, and Nerd diagnostics.
+- The network worker packet accumulator, WS frame format, and current packetization behavior.
+- HTTP/WS, CivetWeb, QR generation, LAN IP selection, server start/stop behavior, and Nerd diagnostics.
 - VST3 identity, bundle naming, build system architecture, and install/copy behavior outside the project.
 
 Preserved behavior:
@@ -135,7 +151,7 @@ Validation performed:
 - Confirmed `assets/logo.png` is included in `juce_add_binary_data` and loaded by the About panel through `PGStreamBinaryData`.
 - Confirmed the buffer target flow is `AudioParameterChoice` index -> `bufferTargetMsForIndex()` -> `StreamConfig.bufferTargetMs` -> `/info` metadata -> browser `configure` message -> AudioWorklet target frames.
 - Ran `scripts\bootstrap_windows.ps1` with GitHub Desktop Git added to `PATH`. It downloaded project-local CMake 4.3.3 under `tools\`, then stopped because no Visual Studio C++ toolchain was found.
-- Ran `scripts\build_release_windows.ps1` with GitHub Desktop Git added to `PATH`; it stopped while generating certificates because OpenSSL was not found in this session.
+- Ran `scripts\build_release_windows.ps1` with GitHub Desktop Git added to `PATH`; it stopped before a complete build because the required native C++ toolchain was not available in that session.
 - Ran `scripts\verify_artifact_windows.ps1`; it failed because `dist\PGStream.vst3` and `PGStream.vst3` do not exist yet.
 - Build and DAW visibility audit were not completed on this machine because `cl.exe`, `vswhere.exe`, and `winget` were not available in this session.
 
@@ -150,7 +166,7 @@ The server binds broadly for LAN reachability, while the displayed URL and QR co
 5. Other non-loopback IPv4
 6. `169.254.x.x` link-local only as a last resort
 
-Virtual/host-only adapters such as VirtualBox, VMware, Hyper-V/vEthernet, Docker, WSL, TAP/TUN/VPN, Loopback, and Host-Only are downranked. The QR code encodes the full HTTPS URL shown in the plugin UI.
+Virtual/host-only adapters such as VirtualBox, VMware, Hyper-V/vEthernet, Docker, WSL, TAP/TUN/VPN, Loopback, and Host-Only are downranked. The QR code encodes the full HTTP URL shown in the plugin UI.
 
 ## Realtime Safety
 

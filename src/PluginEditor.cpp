@@ -400,12 +400,12 @@ void AboutPanel::paint(juce::Graphics& g)
     const juce::String copyright = juce::String::fromUTF8("\xc2\xa9 2026 Arkadiusz Go\xc5\x82\xc4\x85" "b");
     const juce::String description = "Transparent VST3 for streaming audio from the DAW master bus, "
         "and other DAW buses if inserted there, to a browser over LAN.";
-    const juce::String text = juce::String("Version 0.3\n"
+    const juce::String text = juce::String("Version 0.4\n"
         "Author: Aras Pigeon\n\n"
     ) + description + "\n\n"
         + copyright + "\n"
         "https://github.com/Andrulius/PGStream\n"
-        "License: none";
+        "License: AGPL-3.0-only";
 
     g.drawFittedText(text, content.reduced(8, 0), juce::Justification::centredTop, 9);
 }
@@ -505,7 +505,7 @@ PGStreamAudioProcessorEditor::PGStreamAudioProcessorEditor(PGStreamAudioProcesso
     qrCodeLabel.setColour(juce::Label::textColourId, juce::Colour(0xffc7d0d8));
     qrCodeLabel.setText("QR appears when streaming is enabled.", juce::dontSendNotification);
 
-    for (auto* label : { &urlLabel, &clientsLabel, &statusLabel, &countersLabel, &candidateUrlsLabel, &certNoteLabel })
+    for (auto* label : { &urlLabel, &clientsLabel, &statusLabel, &countersLabel, &candidateUrlsLabel })
     {
         addAndMakeVisible(*label);
         label->setJustificationType(juce::Justification::centredLeft);
@@ -514,8 +514,6 @@ PGStreamAudioProcessorEditor::PGStreamAudioProcessorEditor(PGStreamAudioProcesso
 
     countersLabel.setColour(juce::Label::textColourId, juce::Colour(0xffd8e0e6));
     candidateUrlsLabel.setColour(juce::Label::textColourId, juce::Colour(0xffc7d0d8));
-    certNoteLabel.setColour(juce::Label::textColourId, juce::Colour(0xfff0d7a7));
-    certNoteLabel.setText("Browsers may need you to accept the embedded self-signed certificate.", juce::dontSendNotification);
 
     addChildComponent(aboutPanel);
     aboutPanel.onClose = [this]
@@ -648,7 +646,6 @@ void PGStreamAudioProcessorEditor::resized()
         area.removeFromTop(8);
     }
 
-    certNoteLabel.setBounds(area.removeFromTop(48));
     aboutPanel.setBounds(getLocalBounds());
 }
 

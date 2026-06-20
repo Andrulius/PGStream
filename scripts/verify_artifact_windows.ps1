@@ -146,7 +146,7 @@ if ($dumpbin -and (Test-Path -LiteralPath $distInner)) {
     $dependencies | ForEach-Object { Write-Host $_ }
 
     if ($dependencies -match "libssl|libcrypto") {
-        Add-Failure "OpenSSL DLL dependency detected; expected static OpenSSL linkage."
+        Add-Failure "libssl/libcrypto DLL dependency detected; the active build should not depend on OpenSSL."
     } else {
         Add-Pass "No libssl/libcrypto DLL dependency detected."
     }

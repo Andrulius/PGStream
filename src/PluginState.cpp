@@ -31,7 +31,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
         juce::ParameterID { ParamIDs::streamEnabled, 1 }, "Enable Stream", false));
 
     params.push_back(std::make_unique<juce::AudioParameterInt>(
-        juce::ParameterID { ParamIDs::httpsPort, 1 }, "HTTPS Port", 1024, 65535, 8123));
+        juce::ParameterID { ParamIDs::httpsPort, 1 }, "HTTP Port", 1024, 65535, 8123));
 
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID { ParamIDs::transportMode, 1 }, "Transport",

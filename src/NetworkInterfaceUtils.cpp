@@ -135,7 +135,7 @@ int rankCandidate(const Candidate& candidate)
 
 juce::String makeUrl(const juce::String& address, int port)
 {
-    return "https://" + address + ":" + juce::String(port) + "/";
+    return "http://" + address + ":" + juce::String(port) + "/";
 }
 
 juce::String describeCandidate(const Candidate& candidate)

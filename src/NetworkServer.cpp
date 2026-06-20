@@ -1,5 +1,4 @@
 #include "NetworkServer.h"
-#include "CertificateManager.h"
 #include "HtmlAssets.h"
 #include <civetweb.h>
 #include <algorithm>
@@ -117,11 +116,10 @@ bool NetworkServer::startServer(const StreamConfig& newConfig)
 {
     struct mg_callbacks callbacks;
     std::memset(&callbacks, 0, sizeof(callbacks));
-    callbacks.init_ssl = &NetworkServer::initSslHandler;
     callbacks.log_message = &NetworkServer::logHandler;
     callbacks.log_access = &NetworkServer::logHandler;
 
-    const auto portString = juce::String(newConfig.port) + "s";
+    const auto portString = juce::String(newConfig.port);
     const char* options[] = {
         "listening_ports", portString.toRawUTF8(),
         "num_threads", "4",
@@ -130,14 +128,13 @@ bool NetworkServer::startServer(const StreamConfig& newConfig)
         "request_timeout_ms", "1500",
         "linger_timeout_ms", "0",
         "authentication_domain", "PGStream",
-        "ssl_protocol_version", "4",
         nullptr
     };
 
     context = mg_start(&callbacks, this, options);
     if (context == nullptr)
     {
-        updateStatus("port bind or TLS start failed");
+        updateStatus("port bind or server start failed");
         contextRunning.store(false, std::memory_order_release);
         return false;
     }
@@ -150,7 +147,6 @@ bool NetworkServer::startServer(const StreamConfig& newConfig)
     mg_set_request_handler(context, "/pgs.png", &NetworkServer::requestHandler, this);
     mg_set_request_handler(context, "/healthz", &NetworkServer::requestHandler, this);
     mg_set_request_handler(context, "/info", &NetworkServer::requestHandler, this);
-    mg_set_request_handler(context, "/cert-info", &NetworkServer::requestHandler, this);
     mg_set_websocket_handler(context,
                              "/ws",
                              &NetworkServer::wsConnectHandler,
@@ -632,16 +628,6 @@ int NetworkServer::handleHttpRequest(mg_connection* connection)
         return 200;
     }
 
-    if (std::strcmp(uri, "/cert-info") == 0)
-    {
-        const auto json = juce::String("{\"certificate\":\"")
-            + CertificateManager::certificateSummary()
-            + "\"}";
-        mg_send_http_ok(connection, "application/json; charset=utf-8", json.getNumBytesAsUTF8());
-        mg_write(connection, json.toRawUTF8(), json.getNumBytesAsUTF8());
-        return 200;
-    }
-
     HtmlAsset asset;
     if (getHtmlAsset(uri, asset))
     {
@@ -652,11 +638,6 @@ int NetworkServer::handleHttpRequest(mg_connection* connection)
 
     mg_send_http_error(connection, 404, "Not found");
     return 404;
-}
-
-int NetworkServer::handleInitSsl(void* sslContext)
-{
-    return CertificateManager::installIntoSslContext(sslContext);
 }
 
 int NetworkServer::requestHandler(mg_connection* connection, void* cbdata)
@@ -689,11 +670,6 @@ void NetworkServer::wsCloseHandler(const mg_connection* connection, void* cbdata
     auto* mutableConnection = const_cast<mg_connection*> (connection);
     server->hub.remove(mutableConnection);
     server->webrtcSender.removeConnection(mutableConnection);
-}
-
-int NetworkServer::initSslHandler(void* sslContext, void* userData)
-{
-    return static_cast<NetworkServer*> (userData)->handleInitSsl(sslContext);
 }
 
 int NetworkServer::logHandler(const mg_connection*, const char*)

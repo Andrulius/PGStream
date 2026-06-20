@@ -42,6 +42,17 @@
         "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreadedDLL",
         "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "OFF"
       }
+    },
+    {
+      "name": "vs2026-x64-safe",
+      "displayName": "Visual Studio 2026 x64 Safe",
+      "generator": "Visual Studio 18 2026",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build/vs2026-x64-safe",
+      "cacheVariables": {
+        "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreadedDLL",
+        "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "OFF"
+      }
     }
   ],
   "buildPresets": [
@@ -63,6 +74,11 @@
     {
       "name": "vs2022-safe-release",
       "configurePreset": "vs2022-x64-safe",
+      "configuration": "Release"
+    },
+    {
+      "name": "vs2026-safe-release",
+      "configurePreset": "vs2026-x64-safe",
       "configuration": "Release"
     }
   ]

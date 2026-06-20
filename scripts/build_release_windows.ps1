@@ -41,6 +41,11 @@ function Find-VsWhere {
 function Select-Preset {
     $vswhere = Find-VsWhere
     $instances = & $vswhere -all -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -format json | ConvertFrom-Json
+    $vs2026 = $instances | Where-Object { $_.installationVersion -like "18.*" } | Select-Object -First 1
+    if ($vs2026) {
+        return @{ Configure = "vs2026-x64-safe"; Build = "vs2026-safe-release"; Instance = $vs2026.displayName }
+    }
+
     $vs2022 = $instances | Where-Object { $_.installationVersion -like "17.*" } | Select-Object -First 1
     if ($vs2022) {
         return @{ Configure = "vs2022-x64-safe"; Build = "vs2022-safe-release"; Instance = $vs2022.displayName }
@@ -51,7 +56,7 @@ function Select-Preset {
         return @{ Configure = "vs2019-x64-safe"; Build = "vs2019-safe-release"; Instance = $vs2019.displayName }
     }
 
-    throw "No VS 2022 or VS 2019 C++ toolchain was found."
+    throw "No VS 2026, VS 2022, or VS 2019 C++ toolchain was found."
 }
 
 function Assert-ProjectPath([string] $Path) {
@@ -83,7 +88,6 @@ function Repair-ModuleInfoJson([string] $BundlePath) {
 }
 
 Repair-ProcessPathEnvironment
-& (Join-Path $PSScriptRoot "generate_dev_cert.ps1") -Root $Root
 
 $cmake = Find-CMake
 $preset = Select-Preset

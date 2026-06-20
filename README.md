@@ -2,19 +2,18 @@
 
 PGStream is a Windows x64 VST3 audio effect for transparent stereo master-bus tapping. The DAW audio path is passed through 1:1; the plugin only copies the first stereo pair into a preallocated lock-free FIFO and streams that copy to LAN browser clients.
 
-The embedded server is disabled by default for DAW scan safety. Enabling the stream starts an HTTPS/WSS CivetWeb server inside the plugin. The browser page is plain embedded HTML/CSS/JS. The default transport is WebRTC Opus over libdatachannel, with WSS used for signaling; a WebSocket legacy fallback remains available and uses Web Audio with an AudioWorklet.
+The embedded server is disabled by default for DAW scan safety. Enabling the stream starts a plain HTTP/WS CivetWeb server inside the plugin. The browser page is embedded HTML/CSS/JS. The default transport is WebRTC Opus over libdatachannel with Mbed TLS for DTLS; a WebSocket legacy fallback remains available and uses Web Audio with an AudioWorklet.
 
 ## Build
 
 Requirements:
 
 - Windows x64
-- Visual Studio 2019 or newer with Desktop development with C++
+- Visual Studio 2019 or newer with Desktop development with C++; Visual Studio 2026 is preferred when installed
 - PowerShell
 - Git for Windows
-- OpenSSL for Windows or the OpenSSL executable bundled with Git for Windows
 
-Bootstrap fetches pinned source dependencies into `external/`, prepares project-local tools when needed, and generates a local self-signed development certificate under `assets/certs/`. Those generated files are intentionally ignored by git.
+Bootstrap fetches pinned source dependencies into `external/` and prepares project-local tools when needed. No local TLS certificate or OpenSSL installation is required for the active build.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap_windows.ps1
@@ -64,18 +63,16 @@ Point the DAW scanner at the parent VST3 folder, not at `PGStream.vst3\Contents`
 Insert PGStream at the end of a master bus, enable streaming, then open the shown LAN URL, for example:
 
 ```text
-https://<LAN-IP>:8123/
+http://<LAN-IP>:8123/
 ```
 
-Browsers require a secure context for WebRTC playback and AudioWorklet fallback on LAN clients, so PGStream uses HTTPS and WSS. The certificate is self-signed, embedded in the plugin binary, and must be accepted manually in the browser.
-
-The self-signed certificate can still appear as **not trusted**. That is expected unless the certificate or a local certificate authority is installed in the client device trust store. PGStream keeps HTTPS/WSS because plain HTTP over LAN is not a secure context in most browsers and can prevent phone playback.
+The browser page is served over plain LAN HTTP and uses a plain WS connection for signaling and the legacy fallback. Use it only on a trusted local network.
 
 The browser **Connect / Play** control toggles to **Stop** after playback setup begins. Stop closes the active WebRTC peer or legacy WebSocket stream and allows another start in the same page session without a reload.
 
-In the recommended WebRTC mode, PGStream encodes stereo 48 kHz Opus frames on the network worker thread and sends them as RTP media through libdatachannel. SDP offers from the browser are answered by the plugin over WSS signaling, and the sender uses the offered audio MID and Opus RTP payload type so the remote audio track is paired correctly.
+In the recommended WebRTC mode, PGStream encodes stereo 48 kHz Opus frames on the network worker thread and sends them as RTP media through libdatachannel. SDP offers from the browser are answered by the plugin over WS signaling, and the sender uses the offered audio MID and Opus RTP payload type so the remote audio track is paired correctly.
 
-The WebSocket legacy fallback aggregates DAW-tapped audio into complete WSS audio packets before sending. The default packet duration is 20 ms, which is 960 stereo frames at 48 kHz, 882 stereo frames at 44.1 kHz, and 1920 stereo frames at 96 kHz. The plugin also exposes 40 ms and 60 ms packet modes. The experimental **extr666me** mode sends complete 5 ms packets for minimum latency experiments, is not the default, and still keeps network I/O off the audio thread.
+The WebSocket legacy fallback aggregates DAW-tapped audio into complete WS audio packets before sending. The default packet duration is 20 ms, which is 960 stereo frames at 48 kHz, 882 stereo frames at 44.1 kHz, and 1920 stereo frames at 96 kHz. The plugin also exposes 40 ms and 60 ms packet modes. The experimental **extr666me** mode sends complete 5 ms packets for minimum latency experiments, is not the default, and still keeps network I/O off the audio thread.
 
 Legacy fallback playback starts in a controlled buffering state. The AudioWorklet outputs silence until the client buffer reaches the configured stream buffer target from the plugin metadata, or 100 ms if metadata is not available. Available plugin buffer targets are 20, 40, 60, 100, 250, 500, and 1000 ms, and the plugin editor labels now map directly to the parameter value, `/info` metadata, browser setup, and AudioWorklet target. If the client queue truly starves, the browser enters resync, outputs silence, keeps receiving packets, and resumes once the buffer has rebuilt to the selected target. Normal low-buffer variation is allowed to continue playing instead of repeatedly cycling from target to zero to resync. If the client buffer grows far beyond the selected target plus a small tolerance, the oldest queued audio is trimmed back toward the selected target so latency does not silently climb toward seconds unless a large target was selected.
 
@@ -83,9 +80,9 @@ The browser and DAW do not share a hardware audio clock. WebRTC mode relies on t
 
 The project image `assets/pgs.png` is embedded in the plugin binary. It is displayed in the compact top header of the plugin editor at about 160 px and in the browser UI up to about 180 px, moving to the top center on narrow screens.
 
-The plugin editor renders a QR code at the top, to the left of the `pgs.png` logo, for the selected primary LAN URL after the stream is enabled. The title, small circular `i` About button, QR code, and logo use a compact content-driven header without the previous large empty gap. The encoded QR text is the full HTTPS URL, for example `https://<LAN-IP>:8123/`, and matches the primary LAN URL shown in the editor.
+The plugin editor renders a QR code at the top, to the left of the `pgs.png` logo, for the selected primary LAN URL after the stream is enabled. The title, small circular `i` About button, QR code, and logo use a compact content-driven header without the previous large empty gap. The encoded QR text is the full HTTP URL, for example `http://<LAN-IP>:8123/`, and matches the primary LAN URL shown in the editor.
 
-The plugin editor About panel opens from the small `i` button and closes with its `X` button. It displays the existing embedded `assets/logo.png` image at the top, followed by the plugin name, version 0.3, author, description, copyright, project link, and license note.
+The plugin editor About panel opens from the small `i` button and closes with its `X` button. It displays the existing embedded `assets/logo.png` image at the top, followed by the plugin name, version 0.4, author, description, copyright, project link, and AGPL license note.
 
 ## Nerd Diagnostics
 
@@ -108,7 +105,7 @@ Browser-side diagnostics distinguish client metrics from server metrics:
 - **Remote track**: browser audio track state.
 - **Client AudioWorklet underruns/client buffer fill**: legacy fallback only.
 - **Received packets total**: legacy fallback packet count.
-- WebSocket state remains visible because the same WSS connection is used for WebRTC signaling and legacy fallback.
+- WebSocket state remains visible because the same WS connection is used for WebRTC signaling and legacy fallback.
 
 The old ambiguous **Buffer underruns** label has been replaced with explicit server/client labels.
 
@@ -127,7 +124,7 @@ Loopback `127.0.0.1` is not used as the primary LAN URL unless no other usable a
 
 ## WebRTC Signaling
 
-WebRTC mode uses WSS JSON messages on `/ws` for signaling:
+WebRTC mode uses WS JSON messages on `/ws` for signaling:
 
 - browser to plugin: `webrtc-offer`, with SDP, bitrate, and latency preset
 - plugin to browser: `webrtc-answer`
@@ -138,7 +135,7 @@ Audio media is sent from the plugin to the browser as Opus RTP over the WebRTC p
 
 ## Legacy WebSocket Protocol
 
-Legacy fallback audio is sent as binary WSS frames:
+Legacy fallback audio is sent as binary WS frames:
 
 ```text
 4 bytes  magic "PGS1"
@@ -158,11 +155,11 @@ v1 supports Float32 little-endian and PCM16 little-endian only. In normal packet
 
 If the DAW does not see the plugin, verify that the complete bundle is present under the parent VST3 scan folder and rescan that parent folder. Do not copy only the inner binary, and do not scan `PGStream.vst3\Contents`.
 
-If the browser does not connect, enable the stream in the plugin, check the port, accept the self-signed certificate warning, and confirm the computer firewall allows the DAW to accept LAN connections on the selected port.
+If the browser does not connect, enable the stream in the plugin, check the port, and confirm the computer firewall allows the DAW to accept LAN connections on the selected port.
 
 If WebRTC shows **connected** but there is silence, open browser Stats and check whether `Packets received` increases. In the plugin Nerd view, check `WebRTC open tracks`, `WebRTC encoded packets`, and `WebRTC send calls`. A connected peer with zero packets usually means SDP/track negotiation failed or the DAW is not feeding the plugin input; a connected peer with increasing packets points toward browser/device audio output or mute controls.
 
-If the shown LAN URL is suspicious, run `ipconfig` and compare it with the plugin Nerd candidate URLs. Try `https://<real-LAN-IP>:8123/` using the active Wi-Fi or Ethernet IPv4 address. Avoid `169.254.x.x` unless no private LAN address exists.
+If the shown LAN URL is suspicious, run `ipconfig` and compare it with the plugin Nerd candidate URLs. Try `http://<real-LAN-IP>:8123/` using the active Wi-Fi or Ethernet IPv4 address. Avoid `169.254.x.x` unless no private LAN address exists.
 
 Unstable Wi-Fi may still require a larger browser buffer target such as 250, 500, or 1000 ms. Use 60 ms or lower only when the phone and computer have a clean LAN path.
 
@@ -172,11 +169,11 @@ The public repository contains source code, web assets, build scripts, documenta
 
 - duplicate `dist` VST3 output
 - build directories
-- downloaded JUCE/CivetWeb/CMake dependencies
-- generated development TLS private keys or certificates
+- downloaded JUCE/CivetWeb/Mbed TLS/libdatachannel/Opus/CMake dependencies
+- private keys, certificates, or local binary SDK blobs
 
-Run `scripts\bootstrap_windows.ps1` after cloning to recreate the local generated pieces.
+Run `scripts\bootstrap_windows.ps1` after cloning to recreate the local dependency tree.
 
 ## License
 
-This repository is publicly visible, but no open-source license is granted unless a separate license is added by the copyright holder. See `LICENSE`.
+PGStream is licensed under AGPL-3.0-only. See `LICENSE` and `THIRD_PARTY_NOTICES.md`.

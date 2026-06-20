@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(PGStream VERSION 0.1.0 LANGUAGES C CXX)
+project(PGStream VERSION 0.4.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -11,47 +11,20 @@ set(JUCE_BUILD_EXTRAS OFF CACHE BOOL "" FORCE)
 set(JUCE_COPY_PLUGIN_AFTER_BUILD OFF CACHE BOOL "" FORCE)
 
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(CMAKE_SKIP_INSTALL_RULES ON CACHE BOOL "" FORCE)
 
 add_subdirectory(external/JUCE)
 
-if(NOT DEFINED OPENSSL_ROOT_DIR OR "${OPENSSL_ROOT_DIR}" STREQUAL "")
-    foreach(PGSTREAM_OPENSSL_ROOT_CANDIDATE
-            "C:/Program Files (x86)/Microsoft Visual Studio/2019/Community/Common7/IDE/Extensions/Microsoft/Python/Miniconda/Miniconda3-x64/Library"
-            "C:/Program Files/OpenSSL-Win64"
-            "C:/OpenSSL-Win64")
-        if(EXISTS "${PGSTREAM_OPENSSL_ROOT_CANDIDATE}/include/openssl/ssl.h")
-            set(OPENSSL_ROOT_DIR "${PGSTREAM_OPENSSL_ROOT_CANDIDATE}" CACHE PATH "" FORCE)
-            break()
-        endif()
-    endforeach()
+set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+set(MBEDTLS_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
+set(MBEDTLS_USER_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/cmake/mbedtls_pgstream_config.h" CACHE FILEPATH "" FORCE)
+set(USE_STATIC_MBEDTLS_LIBRARY ON CACHE BOOL "" FORCE)
+set(USE_SHARED_MBEDTLS_LIBRARY OFF CACHE BOOL "" FORCE)
+add_subdirectory(external/mbedtls EXCLUDE_FROM_ALL)
+if(TARGET mbedtls AND NOT TARGET MbedTLS::MbedTLS)
+    add_library(MbedTLS::MbedTLS ALIAS mbedtls)
 endif()
-
-find_package(OpenSSL REQUIRED)
-
-find_path(PGSTREAM_OPENSSL_INCLUDE_DIR
-    NAMES openssl/ssl.h
-    PATHS
-        "C:/Program Files (x86)/Microsoft Visual Studio/2019/Community/Common7/IDE/Extensions/Microsoft/Python/Miniconda/Miniconda3-x64/Library/include"
-        "$ENV{OPENSSL_ROOT_DIR}/include"
-        "C:/Program Files/OpenSSL-Win64/include"
-        "C:/OpenSSL-Win64/include"
-    REQUIRED)
-
-find_library(PGSTREAM_OPENSSL_SSL_LIBRARY
-    NAMES libssl_static libssl
-    PATHS
-        "$ENV{OPENSSL_ROOT_DIR}/lib"
-        "C:/Program Files/OpenSSL-Win64/lib"
-        "C:/OpenSSL-Win64/lib"
-    REQUIRED)
-
-find_library(PGSTREAM_OPENSSL_CRYPTO_LIBRARY
-    NAMES libcrypto_static libcrypto
-    PATHS
-        "$ENV{OPENSSL_ROOT_DIR}/lib"
-        "C:/Program Files/OpenSSL-Win64/lib"
-        "C:/OpenSSL-Win64/lib"
-    REQUIRED)
 
 set(OPUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
 set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
@@ -64,10 +37,19 @@ set(NO_TESTS ON CACHE BOOL "" FORCE)
 set(NO_WEBSOCKET ON CACHE BOOL "" FORCE)
 set(NO_MEDIA OFF CACHE BOOL "" FORCE)
 set(USE_GNUTLS OFF CACHE BOOL "" FORCE)
-set(USE_MBEDTLS OFF CACHE BOOL "" FORCE)
+set(USE_MBEDTLS ON CACHE BOOL "" FORCE)
 set(USE_NICE OFF CACHE BOOL "" FORCE)
 set(PREFER_SYSTEM_LIB OFF CACHE BOOL "" FORCE)
 set(BUILD_SHARED_DEPS_LIBS OFF CACHE BOOL "" FORCE)
+set(ENABLE_OPENSSL OFF CACHE BOOL "" FORCE)
+set(ENABLE_MBEDTLS OFF CACHE BOOL "" FORCE)
+set(ENABLE_NSS OFF CACHE BOOL "" FORCE)
+set(OPENSSL OFF CACHE BOOL "" FORCE)
+set(MBEDTLS OFF CACHE BOOL "" FORCE)
+set(NSS OFF CACHE BOOL "" FORCE)
+set(GCM OFF CACHE BOOL "" FORCE)
+set(LIBSRTP_TEST_APPS OFF CACHE BOOL "" FORCE)
+set(ENABLE_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
 add_subdirectory(external/libdatachannel EXCLUDE_FROM_ALL)
 
 add_library(civetweb_static STATIC
@@ -77,8 +59,7 @@ target_include_directories(civetweb_static
     PUBLIC
         external/civetweb/include
     PRIVATE
-        external/civetweb/src
-        ${PGSTREAM_OPENSSL_INCLUDE_DIR})
+        external/civetweb/src)
 
 target_compile_definitions(civetweb_static
     PRIVATE
@@ -87,8 +68,7 @@ target_compile_definitions(civetweb_static
         NO_CGI
         NO_FILES
         NO_CACHING
-        NO_SSL_DL
-        OPENSSL_API_1_1
+        NO_SSL
         USE_STACK_SIZE=102400
         _CRT_SECURE_NO_WARNINGS
         WIN32_LEAN_AND_MEAN
@@ -107,9 +87,7 @@ juce_add_binary_data(PGStreamAssets
         assets/web/audio-worklet.js
         assets/web/style.css
         assets/logo.png
-        assets/pgs.png
-        assets/certs/dev-cert.pem
-        assets/certs/dev-key.pem)
+        assets/pgs.png)
 
 juce_add_plugin(PGStream
     COMPANY_NAME "PigeonStream"
@@ -139,7 +117,6 @@ target_sources(PGStream
         src/WebSocketHub.cpp
         src/WebRtcAudioSender.cpp
         src/Resampler.cpp
-        src/CertificateManager.cpp
         src/HtmlAssets.cpp)
 
 target_compile_definitions(PGStream
@@ -161,15 +138,12 @@ endif()
 
 target_include_directories(PGStream
     PRIVATE
-        src
-        ${PGSTREAM_OPENSSL_INCLUDE_DIR})
+        src)
 
 target_link_libraries(PGStream
     PRIVATE
         PGStreamAssets
         civetweb_static
-        ${PGSTREAM_OPENSSL_SSL_LIBRARY}
-        ${PGSTREAM_OPENSSL_CRYPTO_LIBRARY}
         Opus::opus
         LibDataChannel::LibDataChannelStatic
         ws2_32

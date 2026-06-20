@@ -73,7 +73,6 @@ private:
     juce::Label statusLabel;
     juce::Label countersLabel;
     juce::Label candidateUrlsLabel;
-    juce::Label certNoteLabel;
     juce::Image logoImage;
     juce::ImageComponent qrCodeImage;
     juce::Label qrCodeLabel;

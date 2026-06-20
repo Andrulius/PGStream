@@ -105,7 +105,7 @@ function Get-VsInstances {
     return $json | ConvertFrom-Json
 }
 
-function Ensure-DependencyClone($Name, $Url, $Tag, $Commit) {
+function Ensure-DependencyClone($Name, $Url, $Ref, $Commit, [bool] $RecurseSubmodules = $false) {
     $git = Find-RealGit
     $path = Join-Path $Root "external\$Name"
     if (Test-Path -LiteralPath (Join-Path $path ".git")) {
@@ -115,15 +115,33 @@ function Ensure-DependencyClone($Name, $Url, $Tag, $Commit) {
     }
 
     New-Item -ItemType Directory -Force -Path (Join-Path $Root "external") | Out-Null
-    Write-Host "Cloning $Name $Tag"
-    & $git clone --depth 1 --branch $Tag $Url $path
+    Write-Host "Cloning $Name $Ref"
+    if ($RecurseSubmodules) {
+        & $git clone --depth 1 --branch $Ref --recurse-submodules $Url $path
+    } else {
+        & $git clone --depth 1 --branch $Ref $Url $path
+    }
     if ($LASTEXITCODE -ne 0) {
-        throw "Could not clone $Name. Manual command: git clone --depth 1 --branch $Tag $Url external\$Name"
+        throw "Could not clone $Name. Manual command: git clone --depth 1 --branch $Ref $Url external\$Name"
     }
 
     $currentAfter = (& $git -C $path rev-parse HEAD).Trim()
     if ($currentAfter -ne $Commit) {
-        Write-Warning "$Name commit is $currentAfter, expected $Commit"
+        Write-Warning "$Name commit is $currentAfter, expected $Commit; attempting exact checkout"
+        & $git -C $path fetch --depth 1 origin $Commit
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not fetch pinned $Name commit $Commit."
+        }
+        & $git -C $path checkout --detach $Commit
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not checkout pinned $Name commit $Commit."
+        }
+        if ($RecurseSubmodules) {
+            & $git -C $path submodule update --init --recursive --depth 1
+            if ($LASTEXITCODE -ne 0) {
+                throw "Could not initialize $Name submodules."
+            }
+        }
     }
 }
 
@@ -158,8 +176,8 @@ foreach ($instance in $instances) {
     Write-Host "$($instance.displayName) $($instance.installationVersion) at $($instance.installationPath)"
 }
 
-if (-not ($instances | Where-Object { $_.installationVersion -like "17.*" })) {
-    Write-Host "VS 2022 not found; using installed VS 2019/MSVC x64 because it is sufficient for this build."
+if (-not ($instances | Where-Object { $_.installationVersion -like "18.*" -or $_.installationVersion -like "17.*" })) {
+    Write-Host "VS 2026/2022 not found; using installed VS 2019/MSVC x64 because it is sufficient for this build."
 }
 
 Write-Section "Windows SDK"
@@ -173,39 +191,12 @@ foreach ($sdkRoot in $sdkRoots) {
     }
 }
 
-Write-Section "OpenSSL"
-$opensslExe = @(
-    "C:\Program Files\OpenSSL-Win64\bin\openssl.exe",
-    "C:\Program Files\Git\mingw64\bin\openssl.exe",
-    "C:\Program Files\Git\usr\bin\openssl.exe"
-) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-
-if (-not $opensslExe) {
-    throw "OpenSSL executable not found. Install OpenSSL for Windows or Git for Windows."
-}
-Write-Host "OpenSSL: $opensslExe"
-& $opensslExe version
-
-$opensslHeaderRoots = @(
-    "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\Common7\IDE\Extensions\Microsoft\Python\Miniconda\Miniconda3-x64\Library\include",
-    "C:\Program Files\OpenSSL-Win64\include"
-)
-$opensslHeaderRoot = $opensslHeaderRoots | Where-Object { Test-Path -LiteralPath (Join-Path $_ "openssl\ssl.h") } | Select-Object -First 1
-if (-not $opensslHeaderRoot) {
-    throw "OpenSSL headers were not found. Install OpenSSL-Win64 developer files."
-}
-Write-Host "OpenSSL headers: $opensslHeaderRoot"
-if (-not (Test-Path -LiteralPath "C:\Program Files\OpenSSL-Win64\lib\libssl_static.lib")) {
-    throw "OpenSSL static libraries were not found under C:\Program Files\OpenSSL-Win64\lib."
-}
-Write-Host "OpenSSL static libraries: C:\Program Files\OpenSSL-Win64\lib"
-
 Write-Section "Dependencies"
 Ensure-DependencyClone "JUCE" "https://github.com/juce-framework/JUCE.git" "8.0.13" "7c9d3783b127263d72bb65fe0a7e2dc8a02a7ac2"
 Ensure-DependencyClone "civetweb" "https://github.com/civetweb/civetweb.git" "v1.16" "d7ba35bbb649209c66e582d5a0244ba988a15159"
-
-Write-Section "Certificate"
-& (Join-Path $PSScriptRoot "generate_dev_cert.ps1") -Root $Root
+Ensure-DependencyClone "opus" "https://github.com/xiph/opus.git" "main" "3da9f7a6db1c05c3996cb363a9d1931a978bf1be"
+Ensure-DependencyClone "libdatachannel" "https://github.com/paullouisageneau/libdatachannel.git" "master" "a542d8703bfab42a5533852e18d6d1879e01080a"
+Ensure-DependencyClone "mbedtls" "https://github.com/Mbed-TLS/mbedtls.git" "mbedtls-3.6.6" "0bebf8b8c7f07abe3571ded48a11aa907a1ffb20" $true
 
 Write-Section "Bootstrap Complete"
 Write-Host "Project root: $Root"

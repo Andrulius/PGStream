@@ -375,7 +375,7 @@ function handleSocketMessage(event) {
 }
 
 function createSocket() {
-  const wsUrl = `wss://${window.location.host}/ws`;
+  const wsUrl = `ws://${window.location.host}/ws`;
   socket = new WebSocket(wsUrl);
   socket.binaryType = "arraybuffer";
   socket.onmessage = handleSocketMessage;

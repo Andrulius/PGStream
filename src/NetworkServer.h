@@ -36,14 +36,12 @@ private:
     void refreshLanSelection(int port);
 
     int handleHttpRequest(mg_connection* connection);
-    int handleInitSsl(void* sslContext);
 
     static int requestHandler(mg_connection* connection, void* cbdata);
     static int wsConnectHandler(const mg_connection* connection, void* cbdata);
     static void wsReadyHandler(mg_connection* connection, void* cbdata);
     static int wsDataHandler(mg_connection* connection, int bits, char* data, size_t dataLen, void* cbdata);
     static void wsCloseHandler(const mg_connection* connection, void* cbdata);
-    static int initSslHandler(void* sslContext, void* userData);
     static int logHandler(const mg_connection*, const char*);
 
     void handleWebSocketText(mg_connection* connection, const char* data, size_t dataLen);
