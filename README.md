@@ -2,7 +2,7 @@
 
 PGStream is a Windows x64 VST3 audio effect for transparent stereo master-bus tapping. The DAW audio path is passed through 1:1; the plugin only copies the first stereo pair into a preallocated lock-free FIFO and streams that copy to LAN browser clients.
 
-The embedded server is disabled by default for DAW scan safety. Enabling the stream starts an HTTPS/WSS CivetWeb server inside the plugin. The browser page is plain embedded HTML/CSS/JS and uses Web Audio with an AudioWorklet, so the listener must press **Start Audio**.
+The embedded server is disabled by default for DAW scan safety. Enabling the stream starts an HTTPS/WSS CivetWeb server inside the plugin. The browser page is plain embedded HTML/CSS/JS. The default transport is WebRTC Opus over libdatachannel, with WSS used for signaling; a WebSocket legacy fallback remains available and uses Web Audio with an AudioWorklet.
 
 ## Build
 
@@ -67,17 +67,19 @@ Insert PGStream at the end of a master bus, enable streaming, then open the show
 https://<LAN-IP>:8123/
 ```
 
-Browsers require a secure context for AudioWorklet on LAN clients, so PGStream uses HTTPS and WSS. The certificate is self-signed, embedded in the plugin binary, and must be accepted manually in the browser.
+Browsers require a secure context for WebRTC playback and AudioWorklet fallback on LAN clients, so PGStream uses HTTPS and WSS. The certificate is self-signed, embedded in the plugin binary, and must be accepted manually in the browser.
 
-The self-signed certificate can still appear as **not trusted**. That is expected unless the certificate or a local certificate authority is installed in the client device trust store. PGStream keeps HTTPS/WSS because plain HTTP over LAN is not a secure context in most browsers and can prevent AudioWorklet playback on phones.
+The self-signed certificate can still appear as **not trusted**. That is expected unless the certificate or a local certificate authority is installed in the client device trust store. PGStream keeps HTTPS/WSS because plain HTTP over LAN is not a secure context in most browsers and can prevent phone playback.
 
-The browser **Start Audio** control toggles to **Stop Audio** after playback setup begins. Stop closes the WebSocket, resets the client buffer and AudioWorklet state, and allows another start in the same page session without a reload.
+The browser **Connect / Play** control toggles to **Stop** after playback setup begins. Stop closes the active WebRTC peer or legacy WebSocket stream and allows another start in the same page session without a reload.
 
-Normal server mode aggregates DAW-tapped audio into complete WSS audio packets before sending. The default packet duration is 20 ms, which is 960 stereo frames at 48 kHz, 882 stereo frames at 44.1 kHz, and 1920 stereo frames at 96 kHz. The plugin also exposes 40 ms and 60 ms packet modes. The experimental **extr666me** mode sends complete 5 ms packets for minimum latency experiments, is not the default, and still keeps network I/O off the audio thread.
+In the recommended WebRTC mode, PGStream encodes stereo 48 kHz Opus frames on the network worker thread and sends them as RTP media through libdatachannel. SDP offers from the browser are answered by the plugin over WSS signaling, and the sender uses the offered audio MID and Opus RTP payload type so the remote audio track is paired correctly.
 
-Browser playback starts in a controlled buffering state. The AudioWorklet outputs silence until the client buffer reaches the configured stream buffer target from the plugin metadata, or 100 ms if metadata is not available. Available plugin buffer targets are 20, 40, 60, 100, 250, 500, and 1000 ms, and the plugin editor labels now map directly to the parameter value, `/info` metadata, browser setup, and AudioWorklet target. If the client queue truly starves, the browser enters resync, outputs silence, keeps receiving packets, and resumes once the buffer has rebuilt to the selected target. Normal low-buffer variation is allowed to continue playing instead of repeatedly cycling from target to zero to resync. If the client buffer grows far beyond the selected target plus a small tolerance, the oldest queued audio is trimmed back toward the selected target so latency does not silently climb toward seconds unless a large target was selected.
+The WebSocket legacy fallback aggregates DAW-tapped audio into complete WSS audio packets before sending. The default packet duration is 20 ms, which is 960 stereo frames at 48 kHz, 882 stereo frames at 44.1 kHz, and 1920 stereo frames at 96 kHz. The plugin also exposes 40 ms and 60 ms packet modes. The experimental **extr666me** mode sends complete 5 ms packets for minimum latency experiments, is not the default, and still keeps network I/O off the audio thread.
 
-The browser and DAW do not share a hardware audio clock over WSS. PGStream handles this by packetizing audio by source frames on the server, buffering by the selected latency target in the AudioWorklet, and using resync/trim behavior when the browser clock and network delivery drift apart.
+Legacy fallback playback starts in a controlled buffering state. The AudioWorklet outputs silence until the client buffer reaches the configured stream buffer target from the plugin metadata, or 100 ms if metadata is not available. Available plugin buffer targets are 20, 40, 60, 100, 250, 500, and 1000 ms, and the plugin editor labels now map directly to the parameter value, `/info` metadata, browser setup, and AudioWorklet target. If the client queue truly starves, the browser enters resync, outputs silence, keeps receiving packets, and resumes once the buffer has rebuilt to the selected target. Normal low-buffer variation is allowed to continue playing instead of repeatedly cycling from target to zero to resync. If the client buffer grows far beyond the selected target plus a small tolerance, the oldest queued audio is trimmed back toward the selected target so latency does not silently climb toward seconds unless a large target was selected.
+
+The browser and DAW do not share a hardware audio clock. WebRTC mode relies on the browser jitter buffer for Opus/RTP playout. Legacy fallback handles drift by packetizing audio by source frames on the server, buffering by the selected latency target in the AudioWorklet, and using resync/trim behavior when the browser clock and network delivery drift apart.
 
 The project image `assets/pgs.png` is embedded in the plugin binary. It is displayed in the compact top header of the plugin editor at about 160 px and in the browser UI up to about 180 px, moving to the top center on narrow screens.
 
@@ -89,21 +91,24 @@ The plugin editor About panel opens from the small `i` button and closes with it
 
 The plugin editor and browser page each include a **Nerd** toggle. Diagnostics are collapsed by default.
 
-Plugin-side diagnostics show server metrics only:
+Plugin-side diagnostics show server and WebRTC sender metrics:
 
 - **Server FIFO underruns**: source starvation after the worker waited for enough frames to form a complete packet. Ordinary "not enough frames yet" polling is not counted as an underrun.
-- **Network packets sent**: successful WebSocket audio packet sends across connected clients.
+- **Network packets sent**: successful legacy WebSocket audio packet sends across connected clients.
 - **WebSocket send failures**: failed WebSocket sends detected by the server.
 - **Connected clients**: current browser clients registered with the embedded WebSocket hub.
+- **WebRTC peers/open tracks**: current libdatachannel peers and open media tracks.
+- **WebRTC encoded packets/send calls**: Opus encoder output and RTP send attempts.
 - **Current selected LAN IP**, bind/listen address, port, stream format, stream sample rate, total frames sent, and candidate LAN URLs.
 
 Browser-side diagnostics distinguish client metrics from server metrics:
 
-- **Client AudioWorklet underruns**: the worklet reached a starvation/resync condition.
-- **Client sequence gaps**: missing or out-of-order stream packet sequence numbers observed in the browser.
-- **Client buffer fill ms**: queued client audio duration inside the AudioWorklet.
-- **Packets/s**: browser receive rate measured over a rolling window.
-- Stream sample rate, AudioContext sample rate, format, WebSocket state, received packet count, decoded frame count, resync count, and last packet sequence.
+- **WebRTC connectionState/iceConnectionState**: browser peer connection state.
+- **Packets received/lost, jitter, RTT, concealed samples, jitter buffer delay**: browser WebRTC inbound audio stats.
+- **Remote track**: browser audio track state.
+- **Client AudioWorklet underruns/client buffer fill**: legacy fallback only.
+- **Received packets total**: legacy fallback packet count.
+- WebSocket state remains visible because the same WSS connection is used for WebRTC signaling and legacy fallback.
 
 The old ambiguous **Buffer underruns** label has been replaced with explicit server/client labels.
 
@@ -120,9 +125,20 @@ The displayed LAN URL is selected from local Windows adapter data without intern
 
 Loopback `127.0.0.1` is not used as the primary LAN URL unless no other usable address is found. Link-local `169.254.x.x` addresses are ignored whenever a better non-loopback IPv4 address exists. Adapter names/descriptions containing VirtualBox, VMware, Hyper-V, vEthernet, Docker, WSL, Loopback, TAP, TUN, VPN, or Host-Only are downranked so host-only/virtual adapters such as `192.168.56.1` do not beat the real Wi-Fi/Ethernet LAN. If several sensible LAN addresses are detected, the plugin Nerd section lists the candidate URLs and marks the selected primary URL. The selection is refreshed while the server runs, so the primary URL and QR can update after an IP change.
 
-## Protocol
+## WebRTC Signaling
 
-Audio is sent as binary WSS frames:
+WebRTC mode uses WSS JSON messages on `/ws` for signaling:
+
+- browser to plugin: `webrtc-offer`, with SDP, bitrate, and latency preset
+- plugin to browser: `webrtc-answer`
+- both directions: `webrtc-candidate`
+- browser to plugin: `webrtc-stop`
+
+Audio media is sent from the plugin to the browser as Opus RTP over the WebRTC peer connection. The C++ sender parses the browser offer and uses the offered audio MID and Opus payload type when building the answer, which keeps the outgoing track matched to the browser's `recvonly` transceiver.
+
+## Legacy WebSocket Protocol
+
+Legacy fallback audio is sent as binary WSS frames:
 
 ```text
 4 bytes  magic "PGS1"
@@ -143,6 +159,8 @@ v1 supports Float32 little-endian and PCM16 little-endian only. In normal packet
 If the DAW does not see the plugin, verify that the complete bundle is present under the parent VST3 scan folder and rescan that parent folder. Do not copy only the inner binary, and do not scan `PGStream.vst3\Contents`.
 
 If the browser does not connect, enable the stream in the plugin, check the port, accept the self-signed certificate warning, and confirm the computer firewall allows the DAW to accept LAN connections on the selected port.
+
+If WebRTC shows **connected** but there is silence, open browser Stats and check whether `Packets received` increases. In the plugin Nerd view, check `WebRTC open tracks`, `WebRTC encoded packets`, and `WebRTC send calls`. A connected peer with zero packets usually means SDP/track negotiation failed or the DAW is not feeding the plugin input; a connected peer with increasing packets points toward browser/device audio output or mute controls.
 
 If the shown LAN URL is suspicious, run `ipconfig` and compare it with the plugin Nerd candidate URLs. Try `https://<real-LAN-IP>:8123/` using the active Wi-Fi or Ethernet IPv4 address. Avoid `169.254.x.x` unless no private LAN address exists.
 

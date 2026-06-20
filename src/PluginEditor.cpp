@@ -433,13 +433,27 @@ PGStreamAudioProcessorEditor::PGStreamAudioProcessorEditor(PGStreamAudioProcesso
       aboutPanel(juce::ImageFileFormat::loadFrom(PGStreamBinaryData::logo_png,
                                                  static_cast<size_t> (PGStreamBinaryData::logo_pngSize)))
 {
-    setSize(600, 620);
+    setSize(600, 720);
     logoImage = juce::ImageFileFormat::loadFrom(PGStreamBinaryData::pgs_png,
                                                 static_cast<size_t> (PGStreamBinaryData::pgs_pngSize));
 
     portSlider.setRange(1024, 65535, 1);
     portSlider.setSliderStyle(juce::Slider::LinearHorizontal);
     portSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 88, 24);
+
+    transportBox.addItem("WebRTC Opus - Recommended", 1);
+    transportBox.addItem("WebSocket Legacy - Fallback", 2);
+
+    bitrateBox.addItem("128 kb/s Good Preview", 1);
+    bitrateBox.addItem("192 kb/s Very Good", 2);
+    bitrateBox.addItem("256 kb/s Studio Preview", 3);
+    bitrateBox.addItem("320 kb/s High Quality / Recommended", 4);
+    bitrateBox.addItem("510 kb/s Experimental Max", 5);
+
+    latencyBox.addItem("Safe", 1);
+    latencyBox.addItem("Balanced", 2);
+    latencyBox.addItem("Low Latency", 3);
+    latencyBox.addItem("Ultra Low / Experimental", 4);
 
     formatBox.addItem("Float32", 1);
     formatBox.addItem("PCM16", 2);
@@ -467,6 +481,9 @@ PGStreamAudioProcessorEditor::PGStreamAudioProcessorEditor(PGStreamAudioProcesso
     };
 
     addLabeled(portLabel, portSlider, "Port");
+    addLabeled(transportLabel, transportBox, "Transport");
+    addLabeled(bitrateLabel, bitrateBox, "Opus Bitrate");
+    addLabeled(latencyLabel, latencyBox, "Latency Mode");
     addLabeled(formatLabel, formatBox, "Format");
     addLabeled(sampleRateLabel, sampleRateBox, "Sample Rate");
     addLabeled(packetLabel, packetBox, "Packet Mode");
@@ -475,7 +492,7 @@ PGStreamAudioProcessorEditor::PGStreamAudioProcessorEditor(PGStreamAudioProcesso
     addAndMakeVisible(nerdButton);
     nerdButton.onClick = [this]
     {
-        setSize(getWidth(), nerdButton.getToggleState() ? 820 : 620);
+        setSize(getWidth(), nerdButton.getToggleState() ? 940 : 720);
         resized();
         timerCallback();
     };
@@ -509,6 +526,9 @@ PGStreamAudioProcessorEditor::PGStreamAudioProcessorEditor(PGStreamAudioProcesso
 
     enableAttachment = std::make_unique<ButtonAttachment>(processor.parameters, ParamIDs::streamEnabled, enableStreamButton);
     portAttachment = std::make_unique<SliderAttachment>(processor.parameters, ParamIDs::httpsPort, portSlider);
+    transportAttachment = std::make_unique<ComboBoxAttachment>(processor.parameters, ParamIDs::transportMode, transportBox);
+    bitrateAttachment = std::make_unique<ComboBoxAttachment>(processor.parameters, ParamIDs::opusBitrate, bitrateBox);
+    latencyAttachment = std::make_unique<ComboBoxAttachment>(processor.parameters, ParamIDs::latencyMode, latencyBox);
     formatAttachment = std::make_unique<ComboBoxAttachment>(processor.parameters, ParamIDs::outputFormat, formatBox);
     sampleRateAttachment = std::make_unique<ComboBoxAttachment>(processor.parameters, ParamIDs::sampleRateMode, sampleRateBox);
     packetAttachment = std::make_unique<ComboBoxAttachment>(processor.parameters, ParamIDs::packetDuration, packetBox);
@@ -578,6 +598,19 @@ void PGStreamAudioProcessorEditor::resized()
 
     area.removeFromTop(8);
     row = area.removeFromTop(32);
+    transportLabel.setBounds(row.removeFromLeft(120));
+    transportBox.setBounds(row);
+
+    area.removeFromTop(8);
+    row = area.removeFromTop(32);
+    bitrateLabel.setBounds(row.removeFromLeft(120));
+    bitrateBox.setBounds(row.removeFromLeft(240));
+    row.removeFromLeft(18);
+    latencyLabel.setBounds(row.removeFromLeft(100));
+    latencyBox.setBounds(row);
+
+    area.removeFromTop(8);
+    row = area.removeFromTop(32);
     formatLabel.setBounds(row.removeFromLeft(120));
     formatBox.setBounds(row.removeFromLeft(150));
     row.removeFromLeft(18);
@@ -598,7 +631,7 @@ void PGStreamAudioProcessorEditor::resized()
 
     urlLabel.setBounds(area.removeFromTop(28));
     clientsLabel.setBounds(area.removeFromTop(24));
-    statusLabel.setBounds(area.removeFromTop(24));
+    statusLabel.setBounds(area.removeFromTop(72));
 
     area.removeFromTop(6);
     nerdButton.setBounds(area.removeFromTop(28).removeFromLeft(90));
@@ -610,7 +643,7 @@ void PGStreamAudioProcessorEditor::resized()
     area.removeFromTop(6);
     if (nerdVisible)
     {
-        countersLabel.setBounds(area.removeFromTop(118));
+        countersLabel.setBounds(area.removeFromTop(146));
         candidateUrlsLabel.setBounds(area.removeFromTop(92));
         area.removeFromTop(8);
     }
@@ -626,9 +659,18 @@ void PGStreamAudioProcessorEditor::timerCallback()
 
     urlLabel.setText("LAN URL: " + (url.isNotEmpty() ? url : "enable stream to bind server"),
                      juce::dontSendNotification);
-    clientsLabel.setText("Connected clients: " + juce::String(stats.connectedClients), juce::dontSendNotification);
+    clientsLabel.setText("Legacy clients: " + juce::String(stats.connectedClients)
+                            + "    WebRTC peers: " + juce::String(stats.webrtcPeerCount),
+                         juce::dontSendNotification);
     statusLabel.setText("Status: " + stats.statusText
                             + "    Port: " + juce::String(stats.port)
+                            + "    Transport: " + stats.transportMode
+                            + "\nOpus: " + stats.opusBitratePreset
+                            + "    Latency: " + stats.latencyMode
+                            + "    WebRTC: " + stats.webrtcConnectionState + "/" + stats.webrtcIceConnectionState
+                            + "\nLegacy: " + juce::String(stats.connectedClients)
+                            + "    WebRTC peers: " + juce::String(stats.webrtcPeerCount)
+                            + "    Open tracks: " + juce::String(stats.webrtcOpenTracks)
                             + "    Format: " + stats.streamFormat + " @ " + juce::String(stats.streamSampleRate) + " Hz"
                             + "    Packet: " + stats.packetMode
                             + "    Buffer: " + juce::String(stats.bufferTargetMs) + " ms",
@@ -640,7 +682,12 @@ void PGStreamAudioProcessorEditor::timerCallback()
                               + "    Total frames sent: " + juce::String(stats.framesSent)
                               + "\nCurrent selected LAN IP: " + (stats.currentLanIp.isNotEmpty() ? stats.currentLanIp : "none")
                               + "    Bind/listen address: " + stats.listenAddress
-                              + "\nDropped tap frames: " + juce::String(stats.fifoDroppedFrames),
+                              + "\nSender queue: " + juce::String(stats.senderQueueFillFrames) + "/"
+                              + juce::String(static_cast<int64_t> (stats.senderQueueCapacityFrames)) + " frames"
+                              + " (" + juce::String(stats.senderQueueFillMs, 1) + " ms)"
+                              + "    Dropped tap frames: " + juce::String(stats.fifoDroppedFrames)
+                              + "\nWebRTC encoded packets: " + juce::String(stats.webrtcEncodedPackets)
+                              + "    Encoder overload warnings: " + juce::String(stats.webrtcEncoderOverloadWarnings),
                           juce::dontSendNotification);
 
     juce::StringArray candidateUrls;

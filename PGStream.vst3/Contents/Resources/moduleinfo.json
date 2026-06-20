@@ -1,4 +1,4 @@
-{
+﻿{
   "Name": "PGStream",
   "Version": "0.1.0",
   "Factory Info": {
@@ -46,3 +46,4 @@
     }
   ]
 }
+

@@ -10,7 +10,23 @@ set(JUCE_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(JUCE_BUILD_EXTRAS OFF CACHE BOOL "" FORCE)
 set(JUCE_COPY_PLUGIN_AFTER_BUILD OFF CACHE BOOL "" FORCE)
 
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+
 add_subdirectory(external/JUCE)
+
+if(NOT DEFINED OPENSSL_ROOT_DIR OR "${OPENSSL_ROOT_DIR}" STREQUAL "")
+    foreach(PGSTREAM_OPENSSL_ROOT_CANDIDATE
+            "C:/Program Files (x86)/Microsoft Visual Studio/2019/Community/Common7/IDE/Extensions/Microsoft/Python/Miniconda/Miniconda3-x64/Library"
+            "C:/Program Files/OpenSSL-Win64"
+            "C:/OpenSSL-Win64")
+        if(EXISTS "${PGSTREAM_OPENSSL_ROOT_CANDIDATE}/include/openssl/ssl.h")
+            set(OPENSSL_ROOT_DIR "${PGSTREAM_OPENSSL_ROOT_CANDIDATE}" CACHE PATH "" FORCE)
+            break()
+        endif()
+    endforeach()
+endif()
+
+find_package(OpenSSL REQUIRED)
 
 find_path(PGSTREAM_OPENSSL_INCLUDE_DIR
     NAMES openssl/ssl.h
@@ -36,6 +52,23 @@ find_library(PGSTREAM_OPENSSL_CRYPTO_LIBRARY
         "C:/Program Files/OpenSSL-Win64/lib"
         "C:/OpenSSL-Win64/lib"
     REQUIRED)
+
+set(OPUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(OPUS_INSTALL_PKG_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+set(OPUS_INSTALL_CMAKE_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+add_subdirectory(external/opus EXCLUDE_FROM_ALL)
+
+set(NO_EXAMPLES ON CACHE BOOL "" FORCE)
+set(NO_TESTS ON CACHE BOOL "" FORCE)
+set(NO_WEBSOCKET ON CACHE BOOL "" FORCE)
+set(NO_MEDIA OFF CACHE BOOL "" FORCE)
+set(USE_GNUTLS OFF CACHE BOOL "" FORCE)
+set(USE_MBEDTLS OFF CACHE BOOL "" FORCE)
+set(USE_NICE OFF CACHE BOOL "" FORCE)
+set(PREFER_SYSTEM_LIB OFF CACHE BOOL "" FORCE)
+set(BUILD_SHARED_DEPS_LIBS OFF CACHE BOOL "" FORCE)
+add_subdirectory(external/libdatachannel EXCLUDE_FROM_ALL)
 
 add_library(civetweb_static STATIC
     external/civetweb/src/civetweb.c)
@@ -104,6 +137,7 @@ target_sources(PGStream
         src/NetworkServer.cpp
         src/NetworkInterfaceUtils.cpp
         src/WebSocketHub.cpp
+        src/WebRtcAudioSender.cpp
         src/Resampler.cpp
         src/CertificateManager.cpp
         src/HtmlAssets.cpp)
@@ -136,6 +170,8 @@ target_link_libraries(PGStream
         civetweb_static
         ${PGSTREAM_OPENSSL_SSL_LIBRARY}
         ${PGSTREAM_OPENSSL_CRYPTO_LIBRARY}
+        Opus::opus
+        LibDataChannel::LibDataChannelStatic
         ws2_32
         iphlpapi
         crypt32

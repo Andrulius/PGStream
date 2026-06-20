@@ -38,6 +38,14 @@ juce::String jsonStringArray(const juce::StringArray& values)
     json += "]";
     return json;
 }
+
+juce::String jsonPropertyString(const juce::var& object, const char* name)
+{
+    if (auto* dynamic = object.getDynamicObject())
+        return dynamic->getProperty(name).toString();
+
+    return {};
+}
 }
 
 NetworkServer::NetworkServer(AudioTapFifo& fifoToRead)
@@ -46,6 +54,7 @@ NetworkServer::NetworkServer(AudioTapFifo& fifoToRead)
     readBuffer.resize(8192);
     packetBuffer.resize(8192);
     silenceBuffer.resize(4096);
+    webrtcSilenceBuffer.resize(1920);
 }
 
 NetworkServer::~NetworkServer()
@@ -63,6 +72,7 @@ void NetworkServer::applyConfig(const StreamConfig& newConfig)
 {
     auto adjustedConfig = newConfig;
     adjustedConfig.sessionSampleRate = sessionSampleRate.load(std::memory_order_acquire);
+    webrtcSender.applyConfig(adjustedConfig);
 
     bool needsRestart = false;
     {
@@ -76,6 +86,7 @@ void NetworkServer::applyConfig(const StreamConfig& newConfig)
     if (!adjustedConfig.streamEnabled)
     {
         enabled.store(false, std::memory_order_release);
+        webrtcSender.clear();
         stopServer();
         updateStatus("disabled");
         return;
@@ -92,6 +103,8 @@ void NetworkServer::applyConfig(const StreamConfig& newConfig)
     {
         enabled.store(true, std::memory_order_release);
         resampler.reset();
+        webrtcResampler.reset();
+        webrtcSender.resetAudio();
         startThread();
     }
     else
@@ -167,6 +180,7 @@ void NetworkServer::stopServer()
     }
 
     hub.clear();
+    webrtcSender.clear();
     contextRunning.store(false, std::memory_order_release);
 
     std::lock_guard<std::mutex> lock(statusMutex);
@@ -181,6 +195,7 @@ void NetworkServer::run()
     auto previousSourceRate = 0;
     auto previousTargetRate = 0;
     auto previousPacketFrames = size_t { 0 };
+    auto previousWebRtcFrameFrames = size_t { 0 };
     auto previousOutputFormat = OutputFormat::float32;
     auto lastSourceAudioMs = juce::Time::getMillisecondCounterHiRes();
     auto nextSilencePacketMs = lastSourceAudioMs;
@@ -202,8 +217,12 @@ void NetworkServer::run()
         const auto sourceRate = juce::jmax(1, static_cast<int> (std::round(localConfig.sessionSampleRate)));
         const auto targetRate = localConfig.targetSampleRate();
         const auto packetFrames = static_cast<size_t> (localConfig.packetFrameCount());
+        const auto webRtcFrameFrames = juce::jmax<size_t> (1, webrtcSender.opusFrameCount());
         const auto packetDurationMs = localConfig.packetDurationMs();
-        const auto clients = hub.count();
+        const auto webRtcFrameDurationMs = juce::jmax(1, static_cast<int> (std::round(static_cast<double> (webRtcFrameFrames) * 1000.0 / 48000.0)));
+        const auto legacyClients = hub.count();
+        const auto webRtcTracks = webrtcSender.openTrackCount();
+        const auto clients = legacyClients + webRtcTracks;
         const auto nowMs = juce::Time::getMillisecondCounterHiRes();
 
         if (nowMs >= nextLanRefreshMs)
@@ -215,20 +234,24 @@ void NetworkServer::run()
         if (sourceRate != previousSourceRate
             || targetRate != previousTargetRate
             || packetFrames != previousPacketFrames
+            || webRtcFrameFrames != previousWebRtcFrameFrames
             || localConfig.outputFormat != previousOutputFormat)
         {
             resetPacketAccumulator();
             resampler.reset();
+            webrtcResampler.reset();
+            webrtcSender.resetAudio();
             previousSourceRate = sourceRate;
             previousTargetRate = targetRate;
             previousPacketFrames = packetFrames;
+            previousWebRtcFrameFrames = webRtcFrameFrames;
             previousOutputFormat = localConfig.outputFormat;
             lastSourceAudioMs = nowMs;
-            nextSilencePacketMs = nowMs + packetDurationMs;
+            nextSilencePacketMs = nowMs + juce::jmin(packetDurationMs, webRtcFrameDurationMs);
             starvationReported = false;
         }
 
-        const auto desiredReadFrames = juce::jmax<size_t> (4096, packetFrames);
+        const auto desiredReadFrames = juce::jmax<size_t> (4096, juce::jmax(packetFrames, webRtcFrameFrames));
         if (readBuffer.size() < desiredReadFrames * 2)
             readBuffer.resize(desiredReadFrames * 2);
 
@@ -238,9 +261,13 @@ void NetworkServer::run()
         if (silenceBuffer.size() < packetFrames * 2)
             silenceBuffer.resize(packetFrames * 2, 0.0f);
 
+        if (webrtcSilenceBuffer.size() < webRtcFrameFrames * 2)
+            webrtcSilenceBuffer.resize(webRtcFrameFrames * 2, 0.0f);
+
         if (clients == 0)
         {
             resetPacketAccumulator();
+            webrtcSender.resetAudio();
             fifo.pop(readBuffer.data(), readBuffer.size() / 2);
             wait(20);
             continue;
@@ -250,24 +277,43 @@ void NetworkServer::run()
         if (framesRead > 0)
         {
             lastSourceAudioMs = nowMs;
-            nextSilencePacketMs = nowMs + packetDurationMs;
+            nextSilencePacketMs = nowMs + juce::jmin(packetDurationMs, webRtcFrameDurationMs);
             sourceHasBeenActive = true;
             starvationReported = false;
 
-            const float* framesToSend = readBuffer.data();
-            auto sendFrameCount = framesRead;
-
-            if (sourceRate != targetRate)
+            if (legacyClients > 0)
             {
-                resampler.process(readBuffer.data(), framesRead, sourceRate, targetRate, resampledBuffer);
-                framesToSend = resampledBuffer.data();
-                sendFrameCount = resampledBuffer.size() / 2;
+                const float* framesToSend = readBuffer.data();
+                auto sendFrameCount = framesRead;
+
+                if (sourceRate != targetRate)
+                {
+                    resampler.process(readBuffer.data(), framesRead, sourceRate, targetRate, resampledBuffer);
+                    framesToSend = resampledBuffer.data();
+                    sendFrameCount = resampledBuffer.size() / 2;
+                }
+
+                if (sendFrameCount > 0)
+                    appendAndBroadcastPackets(framesToSend, sendFrameCount, localConfig, targetRate, packetFrames);
             }
 
-            if (sendFrameCount > 0)
-                appendAndBroadcastPackets(framesToSend, sendFrameCount, localConfig, targetRate, packetFrames);
+            if (webRtcTracks > 0)
+            {
+                const float* webRtcFrames = readBuffer.data();
+                auto webRtcFrameCount = framesRead;
 
-            wait(packetBufferFrames == 0 ? 1 : juce::jlimit(2, 10, packetDurationMs / 4));
+                if (sourceRate != 48000)
+                {
+                    webrtcResampler.process(readBuffer.data(), framesRead, sourceRate, 48000, webrtcResampledBuffer);
+                    webRtcFrames = webrtcResampledBuffer.data();
+                    webRtcFrameCount = webrtcResampledBuffer.size() / 2;
+                }
+
+                if (webRtcFrameCount > 0)
+                    webrtcSender.encodeAndSend(webRtcFrames, webRtcFrameCount);
+            }
+
+            wait(packetBufferFrames == 0 ? 1 : juce::jlimit(1, 10, juce::jmin(packetDurationMs, webRtcFrameDurationMs) / 4));
             continue;
         }
 
@@ -290,18 +336,30 @@ void NetworkServer::run()
 
             if (nowMs >= nextSilencePacketMs)
             {
-                std::fill(silenceBuffer.begin(),
-                          silenceBuffer.begin() + static_cast<std::ptrdiff_t> (packetFrames * 2),
-                          0.0f);
-                buildAndBroadcastFrame(silenceBuffer.data(), packetFrames, localConfig, targetRate, true);
-                nextSilencePacketMs = nowMs + packetDurationMs;
+                if (legacyClients > 0)
+                {
+                    std::fill(silenceBuffer.begin(),
+                              silenceBuffer.begin() + static_cast<std::ptrdiff_t> (packetFrames * 2),
+                              0.0f);
+                    buildAndBroadcastFrame(silenceBuffer.data(), packetFrames, localConfig, targetRate, true);
+                }
+
+                if (webRtcTracks > 0)
+                {
+                    std::fill(webrtcSilenceBuffer.begin(),
+                              webrtcSilenceBuffer.begin() + static_cast<std::ptrdiff_t> (webRtcFrameFrames * 2),
+                              0.0f);
+                    webrtcSender.encodeAndSend(webrtcSilenceBuffer.data(), webRtcFrameFrames);
+                }
+
+                nextSilencePacketMs = nowMs + juce::jmin(packetDurationMs, webRtcFrameDurationMs);
             }
 
-            wait(juce::jlimit(2, 20, packetDurationMs / 2));
+            wait(juce::jlimit(1, 20, juce::jmin(packetDurationMs, webRtcFrameDurationMs) / 2));
             continue;
         }
 
-        wait(juce::jlimit(2, 10, packetDurationMs / 4));
+        wait(juce::jlimit(1, 10, juce::jmin(packetDurationMs, webRtcFrameDurationMs) / 4));
     }
 
     resetPacketAccumulator();
@@ -411,6 +469,47 @@ void NetworkServer::appendU32(uint32_t value)
     frameBuffer.push_back(static_cast<uint8_t> ((value >> 24) & 0xff));
 }
 
+void NetworkServer::handleWebSocketText(mg_connection* connection, const char* data, size_t dataLen)
+{
+    if (connection == nullptr || data == nullptr || dataLen == 0)
+        return;
+
+    const auto text = juce::String::fromUTF8(data, static_cast<int> (dataLen));
+    const auto message = juce::JSON::parse(text);
+    const auto type = jsonPropertyString(message, "type");
+
+    if (type == "legacy-start")
+    {
+        hub.add(connection);
+        return;
+    }
+
+    if (type == "legacy-stop")
+    {
+        hub.remove(connection);
+        return;
+    }
+
+    if (type == "webrtc-offer")
+    {
+        hub.remove(connection);
+        webrtcSender.handleOffer(connection, message);
+        return;
+    }
+
+    if (type == "webrtc-candidate")
+    {
+        webrtcSender.handleRemoteCandidate(connection, message);
+        return;
+    }
+
+    if (type == "webrtc-stop")
+    {
+        webrtcSender.removeConnection(connection);
+        return;
+    }
+}
+
 void NetworkServer::refreshLanSelection(int port)
 {
     const auto networkSelection = selectBestLanInterface(port);
@@ -456,6 +555,20 @@ int NetworkServer::handleHttpRequest(mg_connection* connection)
         json += juce::String(localConfig.targetSampleRate());
         json += ",\"channels\":2,\"bufferTargetMs\":";
         json += juce::String(localConfig.bufferTargetMs);
+        json += ",\"transport\":";
+        json += jsonString(stats.transportMode);
+        json += ",\"opusCodec\":\"opus/48000/2\",\"opusBitrateBps\":";
+        json += juce::String(stats.opusBitrateBps);
+        json += ",\"opusBitratePreset\":";
+        json += jsonString(stats.opusBitratePreset);
+        json += ",\"opusBitrateLimited\":";
+        json += stats.opusBitrateLimited ? "true" : "false";
+        json += ",\"latencyPreset\":";
+        json += jsonString(stats.latencyMode);
+        json += ",\"latencyTarget\":";
+        json += jsonString(stats.latencyTarget);
+        json += ",\"opusFrameDurationMs\":";
+        json += juce::String(stats.opusFrameDurationMs);
         json += ",\"packetDurationMs\":";
         json += juce::String(localConfig.packetDurationMs());
         json += ",\"packetMode\":";
@@ -468,6 +581,14 @@ int NetworkServer::handleHttpRequest(mg_connection* connection)
         json += juce::String(stats.websocketSendFailures);
         json += ",\"connectedClients\":";
         json += juce::String(stats.connectedClients);
+        json += ",\"webrtcPeerCount\":";
+        json += juce::String(stats.webrtcPeerCount);
+        json += ",\"webrtcOpenTracks\":";
+        json += juce::String(stats.webrtcOpenTracks);
+        json += ",\"webrtcConnectionState\":";
+        json += jsonString(stats.webrtcConnectionState);
+        json += ",\"webrtcIceConnectionState\":";
+        json += jsonString(stats.webrtcIceConnectionState);
         json += ",\"currentLanIp\":";
         json += jsonString(stats.currentLanIp);
         json += ",\"listenAddress\":";
@@ -480,6 +601,24 @@ int NetworkServer::handleHttpRequest(mg_connection* connection)
         json += juce::String(stats.streamSampleRate);
         json += ",\"framesSent\":";
         json += juce::String(stats.framesSent);
+        json += ",\"senderQueueFillFrames\":";
+        json += juce::String(static_cast<int64_t> (stats.senderQueueFillFrames));
+        json += ",\"senderQueueCapacityFrames\":";
+        json += juce::String(static_cast<int64_t> (stats.senderQueueCapacityFrames));
+        json += ",\"senderQueueFillMs\":";
+        json += juce::String(stats.senderQueueFillMs, 2);
+        json += ",\"senderDroppedFrames\":";
+        json += juce::String(stats.fifoDroppedFrames);
+        json += ",\"webrtcEncodedFrames\":";
+        json += juce::String(stats.webrtcEncodedFrames);
+        json += ",\"webrtcEncodedPackets\":";
+        json += juce::String(stats.webrtcEncodedPackets);
+        json += ",\"webrtcEncodedBytes\":";
+        json += juce::String(stats.webrtcEncodedBytes);
+        json += ",\"webrtcSendCalls\":";
+        json += juce::String(stats.webrtcSendCalls);
+        json += ",\"webrtcEncoderOverloadWarnings\":";
+        json += juce::String(stats.webrtcEncoderOverloadWarnings);
         json += ",\"status\":";
         json += jsonString(stats.statusText);
         json += ",\"lanUrl\":";
@@ -532,17 +671,24 @@ int NetworkServer::wsConnectHandler(const mg_connection*, void*)
 
 void NetworkServer::wsReadyHandler(mg_connection* connection, void* cbdata)
 {
-    static_cast<NetworkServer*> (cbdata)->hub.add(connection);
+    juce::ignoreUnused(connection, cbdata);
 }
 
-int NetworkServer::wsDataHandler(mg_connection*, int, char*, size_t, void*)
+int NetworkServer::wsDataHandler(mg_connection* connection, int bits, char* data, size_t dataLen, void* cbdata)
 {
+    const auto opcode = bits & 0x0f;
+    if (opcode == MG_WEBSOCKET_OPCODE_TEXT)
+        static_cast<NetworkServer*> (cbdata)->handleWebSocketText(connection, data, dataLen);
+
     return 1;
 }
 
 void NetworkServer::wsCloseHandler(const mg_connection* connection, void* cbdata)
 {
-    static_cast<NetworkServer*> (cbdata)->hub.remove(const_cast<mg_connection*> (connection));
+    auto* server = static_cast<NetworkServer*> (cbdata);
+    auto* mutableConnection = const_cast<mg_connection*> (connection);
+    server->hub.remove(mutableConnection);
+    server->webrtcSender.removeConnection(mutableConnection);
 }
 
 int NetworkServer::initSslHandler(void* sslContext, void* userData)
@@ -574,16 +720,29 @@ StreamStats NetworkServer::getStats() const
     stats.streamEnabled = enabled.load(std::memory_order_acquire);
     stats.port = localConfig.port;
     stats.connectedClients = hub.count();
+    stats.transportMode = localConfig.transportModeName();
     stats.streamFormat = localConfig.formatName();
     stats.streamSampleRate = localConfig.targetSampleRate();
     stats.bufferTargetMs = localConfig.bufferTargetMs;
     stats.packetDurationMs = localConfig.packetDurationMs();
     stats.packetMode = localConfig.packetModeName();
+    stats.opusBitrateBps = localConfig.opusBitrateBps();
+    stats.opusBitratePreset = localConfig.opusBitrateName();
+    stats.opusBitrateLimited = false;
+    stats.latencyMode = localConfig.latencyModeName();
+    stats.latencyTarget = localConfig.latencyTargetDescription();
+    stats.opusFrameDurationMs = localConfig.opusFrameDurationMs();
     stats.framesSent = framesSent.load(std::memory_order_relaxed);
     stats.serverFifoUnderruns = serverFifoUnderruns.load(std::memory_order_relaxed);
     stats.networkPacketsSent = networkPacketsSent.load(std::memory_order_relaxed);
     stats.websocketSendFailures = websocketSendFailures.load(std::memory_order_relaxed);
     stats.fifoDroppedFrames = fifo.getDroppedFrames();
+    stats.senderQueueFillFrames = fifo.getAvailableFrames();
+    stats.senderQueueCapacityFrames = fifo.getCapacityFrames();
+    if (localConfig.sessionSampleRate > 1.0)
+        stats.senderQueueFillMs = (static_cast<double> (stats.senderQueueFillFrames) / localConfig.sessionSampleRate) * 1000.0;
+
+    webrtcSender.fillStats(stats);
 
     {
         std::lock_guard<std::mutex> lock(statusMutex);

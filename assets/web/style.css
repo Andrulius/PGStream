@@ -109,6 +109,41 @@ button:disabled {
   cursor: default;
 }
 
+.controls {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.controls label {
+  display: grid;
+  gap: 8px;
+}
+
+.controls span {
+  color: #9eabb4;
+  font-size: 13px;
+}
+
+select {
+  width: 100%;
+  min-height: 44px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 6px;
+  padding: 0 12px;
+  background: #20262a;
+  color: #f3f5f7;
+  font: inherit;
+}
+
+audio {
+  display: block;
+  width: 100%;
+  height: 42px;
+  margin: 0 0 18px;
+}
+
 .grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -184,6 +219,10 @@ button:disabled {
   .actions {
     width: 100%;
     justify-content: center;
+  }
+
+  .controls {
+    grid-template-columns: 1fr;
   }
 
   button {

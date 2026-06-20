@@ -4,6 +4,7 @@
 #include "NetworkInterfaceUtils.h"
 #include "Resampler.h"
 #include "StreamTypes.h"
+#include "WebRtcAudioSender.h"
 #include "WebSocketHub.h"
 #include <juce_core/juce_core.h>
 #include <atomic>
@@ -45,6 +46,7 @@ private:
     static int initSslHandler(void* sslContext, void* userData);
     static int logHandler(const mg_connection*, const char*);
 
+    void handleWebSocketText(mg_connection* connection, const char* data, size_t dataLen);
     void buildAndBroadcastFrame(const float* interleavedStereo,
                                 size_t frameCount,
                                 const StreamConfig& frameConfig,
@@ -82,13 +84,17 @@ private:
 
     mg_context* context = nullptr;
     WebSocketHub hub;
+    WebRtcAudioSender webrtcSender;
     Resampler resampler;
+    Resampler webrtcResampler;
 
     std::vector<float> readBuffer;
     std::vector<float> resampledBuffer;
+    std::vector<float> webrtcResampledBuffer;
     std::vector<float> packetBuffer;
     size_t packetBufferFrames = 0;
     std::vector<float> silenceBuffer;
+    std::vector<float> webrtcSilenceBuffer;
     std::vector<uint8_t> frameBuffer;
 };
 }

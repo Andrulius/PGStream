@@ -25,6 +25,13 @@ void AudioTapFifo::reset()
     droppedFrames.store(0, std::memory_order_release);
 }
 
+size_t AudioTapFifo::getAvailableFrames() const noexcept
+{
+    const auto read = readIndex.load(std::memory_order_acquire);
+    const auto write = writeIndex.load(std::memory_order_acquire);
+    return std::min<size_t> (capacityFrames, static_cast<size_t> (write - read));
+}
+
 void AudioTapFifo::pushFromAudioThread(const juce::AudioBuffer<float>& buffer, int inputChannels, int frameCount) noexcept
 {
     if (capacityFrames == 0 || frameCount <= 0 || inputChannels <= 0)
@@ -93,4 +100,3 @@ size_t AudioTapFifo::pop(float* destinationInterleavedStereo, size_t maxFrames) 
     return available;
 }
 }
-

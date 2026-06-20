@@ -12,6 +12,9 @@ PGStreamAudioProcessor::PGStreamAudioProcessor()
 {
     parameters.addParameterListener(ParamIDs::streamEnabled, this);
     parameters.addParameterListener(ParamIDs::httpsPort, this);
+    parameters.addParameterListener(ParamIDs::transportMode, this);
+    parameters.addParameterListener(ParamIDs::opusBitrate, this);
+    parameters.addParameterListener(ParamIDs::latencyMode, this);
     parameters.addParameterListener(ParamIDs::outputFormat, this);
     parameters.addParameterListener(ParamIDs::sampleRateMode, this);
     parameters.addParameterListener(ParamIDs::packetDuration, this);
@@ -25,6 +28,9 @@ PGStreamAudioProcessor::~PGStreamAudioProcessor()
     cancelPendingUpdate();
     parameters.removeParameterListener(ParamIDs::streamEnabled, this);
     parameters.removeParameterListener(ParamIDs::httpsPort, this);
+    parameters.removeParameterListener(ParamIDs::transportMode, this);
+    parameters.removeParameterListener(ParamIDs::opusBitrate, this);
+    parameters.removeParameterListener(ParamIDs::latencyMode, this);
     parameters.removeParameterListener(ParamIDs::outputFormat, this);
     parameters.removeParameterListener(ParamIDs::sampleRateMode, this);
     parameters.removeParameterListener(ParamIDs::packetDuration, this);

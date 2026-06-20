@@ -15,10 +15,41 @@
         <p>LAN master-bus monitor</p>
       </div>
       <div class="actions">
-        <button id="startButton" type="button">Start Audio</button>
-        <button id="nerdButton" class="secondary" type="button" aria-expanded="false">Nerd</button>
+        <button id="startButton" type="button">Connect / Play</button>
+        <button id="nerdButton" class="secondary" type="button" aria-expanded="false">Stats</button>
       </div>
     </section>
+
+    <section class="controls" aria-label="Stream controls">
+      <label>
+        <span>Transport</span>
+        <select id="transportSelect">
+          <option value="webrtc">WebRTC Opus - Recommended</option>
+          <option value="legacy">WebSocket Legacy - Fallback</option>
+        </select>
+      </label>
+      <label>
+        <span>Bitrate</span>
+        <select id="bitrateSelect">
+          <option value="128000">128 kb/s Good Preview</option>
+          <option value="192000">192 kb/s Very Good</option>
+          <option value="256000">256 kb/s Studio Preview</option>
+          <option value="320000" selected>320 kb/s High Quality / Recommended</option>
+          <option value="510000">510 kb/s Experimental Max</option>
+        </select>
+      </label>
+      <label>
+        <span>Latency</span>
+        <select id="latencySelect">
+          <option value="safe">Safe</option>
+          <option value="balanced" selected>Balanced</option>
+          <option value="low">Low Latency</option>
+          <option value="ultra">Ultra Low / Experimental</option>
+        </select>
+      </label>
+    </section>
+
+    <audio id="remoteAudio" autoplay playsinline controls></audio>
 
     <section class="grid main-metrics">
       <div class="metric">
@@ -26,92 +57,114 @@
         <strong id="connection">stopped</strong>
       </div>
       <div class="metric">
-        <span>Format</span>
-        <strong id="format">-</strong>
+        <span>Transport</span>
+        <strong id="transport">-</strong>
       </div>
       <div class="metric">
-        <span>Stream rate</span>
-        <strong id="sampleRate">-</strong>
+        <span>Codec</span>
+        <strong id="codec">-</strong>
       </div>
       <div class="metric">
-        <span>Client buffer</span>
-        <strong id="bufferFill">0 ms</strong>
+        <span>Bitrate</span>
+        <strong id="bitrate">-</strong>
       </div>
     </section>
 
     <section id="nerdPanel" class="nerd" hidden>
       <div class="nerd-group">
-        <h2>Client</h2>
+        <h2>WebRTC</h2>
         <div class="grid">
           <div class="metric">
-            <span>Stream sample rate</span>
-            <strong id="nerdStreamRate">-</strong>
+            <span>connectionState</span>
+            <strong id="rtcConnectionState">closed</strong>
           </div>
           <div class="metric">
-            <span>AudioContext sample rate</span>
-            <strong id="audioContextRate">-</strong>
+            <span>iceConnectionState</span>
+            <strong id="iceConnectionState">closed</strong>
           </div>
           <div class="metric">
-            <span>Format</span>
-            <strong id="nerdFormat">-</strong>
+            <span>Actual bitrate estimate</span>
+            <strong id="actualBitrate">0 kb/s</strong>
+          </div>
+          <div class="metric">
+            <span>Packets received</span>
+            <strong id="packetsReceived">0</strong>
+          </div>
+          <div class="metric">
+            <span>Packets lost</span>
+            <strong id="packetsLost">0</strong>
+          </div>
+          <div class="metric">
+            <span>Jitter</span>
+            <strong id="jitter">0 ms</strong>
+          </div>
+          <div class="metric">
+            <span>Round trip time</span>
+            <strong id="roundTripTime">-</strong>
+          </div>
+          <div class="metric">
+            <span>Concealed samples</span>
+            <strong id="concealedSamples">-</strong>
+          </div>
+          <div class="metric">
+            <span>Jitter buffer delay</span>
+            <strong id="jitterBufferDelay">-</strong>
+          </div>
+          <div class="metric">
+            <span>Jitter buffer target</span>
+            <strong id="jitterBufferTargetDelay">-</strong>
+          </div>
+          <div class="metric">
+            <span>Remote track</span>
+            <strong id="remoteTrackState">none</strong>
+          </div>
+          <div class="metric">
+            <span>Latency preset</span>
+            <strong id="latencyPreset">-</strong>
+          </div>
+        </div>
+      </div>
+
+      <div class="nerd-group">
+        <h2>Sender</h2>
+        <div class="grid">
+          <div class="metric">
+            <span>Queue fill</span>
+            <strong id="senderQueueFill">0 ms</strong>
+          </div>
+          <div class="metric">
+            <span>Dropped frames</span>
+            <strong id="senderDroppedFrames">0</strong>
+          </div>
+          <div class="metric">
+            <span>Encoder overload warnings</span>
+            <strong id="encoderOverloads">0</strong>
+          </div>
+          <div class="metric">
+            <span>WebRTC open tracks</span>
+            <strong id="webrtcOpenTracks">0</strong>
+          </div>
+        </div>
+      </div>
+
+      <div class="nerd-group">
+        <h2>Legacy Fallback</h2>
+        <div class="grid">
+          <div class="metric">
+            <span>WebSocket state</span>
+            <strong id="webSocketState">closed</strong>
           </div>
           <div class="metric">
             <span>Client buffer fill</span>
             <strong id="clientBufferFillMs">0 ms</strong>
           </div>
           <div class="metric">
-            <span>Packets/s</span>
-            <strong id="packetsPerSecond">0</strong>
-          </div>
-          <div class="metric">
-            <span>Client sequence gaps</span>
-            <strong id="clientSequenceGaps">0</strong>
-          </div>
-          <div class="metric">
-            <span>Client AudioWorklet underruns</span>
-            <strong id="clientWorkletUnderruns">0</strong>
-          </div>
-          <div class="metric">
-            <span>WebSocket state</span>
-            <strong id="webSocketState">closed</strong>
-          </div>
-          <div class="metric">
             <span>Received packets total</span>
             <strong id="packetsTotal">0</strong>
           </div>
           <div class="metric">
-            <span>Decoded frames total</span>
-            <strong id="frames">0</strong>
-          </div>
-          <div class="metric">
-            <span>Resync count</span>
-            <strong id="resyncCount">0</strong>
-          </div>
-          <div class="metric">
-            <span>Last packet sequence</span>
-            <strong id="lastSequence">-</strong>
-          </div>
-        </div>
-      </div>
-
-      <div class="nerd-group server-nerd">
-        <h2>Server</h2>
-        <div class="grid">
-          <div class="metric">
-            <span>Server FIFO underruns</span>
-            <strong id="serverFifoUnderruns">0</strong>
-          </div>
-          <div class="metric">
-            <span>Network packets sent</span>
-            <strong id="networkPacketsSent">0</strong>
-          </div>
-          <div class="metric">
-            <span>WebSocket send failures</span>
-            <strong id="websocketSendFailures">0</strong>
-          </div>
-          <div class="metric">
-            <span>Connected clients</span>
-            <strong id="connectedClients">0</strong>
+            <span>AudioWorklet underruns</span>
+            <strong id="clientWorkletUnderruns">0</strong>
           </div>
         </div>
       </div>

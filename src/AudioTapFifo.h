@@ -17,6 +17,8 @@ public:
     size_t pop(float* destinationInterleavedStereo, size_t maxFrames) noexcept;
 
     uint64_t getDroppedFrames() const noexcept { return droppedFrames.load(std::memory_order_relaxed); }
+    size_t getCapacityFrames() const noexcept { return capacityFrames; }
+    size_t getAvailableFrames() const noexcept;
 
 private:
     size_t capacityFrames = 0;
@@ -27,4 +29,3 @@ private:
     std::atomic<uint64_t> droppedFrames { 0 };
 };
 }
-

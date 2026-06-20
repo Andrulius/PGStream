@@ -1,10 +1,10 @@
 # Build Notes
 
-PGStream is a native Windows x64 VST3 built with JUCE, CMake, CivetWeb, and OpenSSL. The project is designed so the DAW audio path remains transparent while browser streaming runs on a separate non-realtime network worker.
+PGStream is a native Windows x64 VST3 built with JUCE, CMake, CivetWeb, OpenSSL, Opus, and libdatachannel. The project is designed so the DAW audio path remains transparent while browser streaming runs on a separate non-realtime network worker.
 
 ## Source Dependencies
 
-The repository does not vendor JUCE, CivetWeb, CMake, generated certificates, build folders, or duplicate `dist` artefacts. The root `PGStream.vst3` bundle is tracked as the distributable VST3 artefact. Run the bootstrap script to fetch pinned dependencies and generate local development certificates:
+The repository does not vendor generated build folders or duplicate `dist` artefacts. The root `PGStream.vst3` bundle is tracked as the distributable VST3 artefact. Run the bootstrap script to fetch pinned dependencies and generate local development certificates:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap_windows.ps1
@@ -14,6 +14,7 @@ Pinned dependency versions:
 
 - JUCE: `8.0.13`
 - CivetWeb: `v1.16`
+- libdatachannel and Opus: built from the repository `external` tree used by CMake
 - CMake: `4.3.3` project-local fallback when the system CMake is too old
 
 ## TLS Strategy
@@ -66,11 +67,35 @@ The verification script checks:
 
 ## Streaming Behavior
 
-Normal server mode packetizes audio on the network worker into complete fixed-duration WSS frames. The default packet duration is 20 ms, with optional 40 ms and 60 ms modes. The experimental **extr666me** mode sends complete 5 ms packets and is not the default.
+The default browser transport is WebRTC Opus. WSS is used for SDP/ICE signaling, then Opus audio is sent as RTP media through libdatachannel. The browser creates a recvonly audio transceiver; the plugin answers with a sendonly Opus track. The sender must use the browser offer's audio MID and Opus RTP payload type, otherwise ICE/DTLS can appear connected while no usable audio media is paired to the browser track.
+
+Legacy WebSocket fallback packetizes audio on the network worker into complete fixed-duration WSS frames. The default packet duration is 20 ms, with optional 40 ms and 60 ms modes. The experimental **extr666me** mode sends complete 5 ms packets and is not the default.
 
 FIFO polling is not treated as an underrun when there are simply not enough frames for a complete packet yet. Server FIFO underruns are reserved for real source starvation after the worker has waited/backed off. If keep-alive is enabled during real idle, full-size silence packets are sent at the selected packet duration.
 
-Browser buffer targets are 20, 40, 60, 100, 250, 500, and 1000 ms. The AudioWorklet starts playback after the selected target is buffered, resyncs back to that target after starvation, and trims excess queued audio so latency does not silently drift toward seconds unless a large target is selected.
+Browser buffer targets are 20, 40, 60, 100, 250, 500, and 1000 ms for the legacy fallback path. The AudioWorklet starts playback after the selected target is buffered, resyncs back to that target after starvation, and trims excess queued audio so latency does not silently drift toward seconds unless a large target is selected.
+
+## 2026-06-20 WebRTC Opus and VS2026 Build Pass
+
+Changed:
+
+- Added WebRTC Opus browser playback as the recommended transport, with WebSocket legacy fallback still available.
+- Added C++ WebRTC sender support using libdatachannel, Opus encoding, RTP packetization, RTCP sender reports, and NACK response handling.
+- Added browser-side WebRTC controls and diagnostics for connection state, ICE state, inbound packets, loss, jitter, RTT, concealed samples, jitter buffer delay, and remote track state.
+- Fixed a WebRTC media pairing bug by parsing the browser SDP offer and using the offered audio MID and Opus RTP payload type when creating the outgoing sendonly track.
+- Built and committed the root `PGStream.vst3` distributable bundle from the latest VS2026 build.
+
+Validation performed:
+
+- Built `PGStream_VST3.vcxproj` in `Release|x64` with MSBuild `/m:1`, `/MP` disabled in the generated project files, and no Visual Studio GUI.
+- Peak observed compiler working set during the all-in VST3 target build was about 623 MB.
+- Ran `scripts\verify_artifact_windows.ps1`: both `PGStream.vst3` and `dist\PGStream.vst3` passed bundle, JSON, x64 PE, naming, and OpenSSL dependency checks.
+- Confirmed `dumpbin /DEPENDENTS` reports no `libssl` or `libcrypto` DLL dependency.
+
+Notes:
+
+- The installed `C:\Program Files\OpenSSL-Win64\include` tree is incomplete because it contains `openssl/configuration.h.in` but not generated `openssl/configuration.h`.
+- The successful build uses complete OpenSSL 1.1.1 headers from the VS2019 Miniconda install and statically links OpenSSL libraries from `OpenSSL-Win64`.
 
 ## 2026-06-16 Polish and Buffer Fix Pass
 
@@ -93,7 +118,7 @@ Preserved behavior:
 
 - Server remains disabled by default for DAW scan safety.
 - Normal mode still sends complete aggregated packets, with 20 ms as the default packet duration.
-- Browser playback remains plain HTML/CSS/JS plus AudioWorklet, without Node, npm, React, Electron, WebRTC, or helper daemons.
+- Browser playback remains plain HTML/CSS/JS, without Node, npm, React, Electron, or helper daemons. WebRTC uses the browser's built-in `RTCPeerConnection`; the legacy fallback continues to use AudioWorklet.
 
 Files added:
 

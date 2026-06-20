@@ -9,6 +9,9 @@ namespace ParamIDs
 {
 static constexpr const char* streamEnabled = "streamEnabled";
 static constexpr const char* httpsPort = "httpsPort";
+static constexpr const char* transportMode = "transportMode";
+static constexpr const char* opusBitrate = "opusBitrate";
+static constexpr const char* latencyMode = "latencyMode";
 static constexpr const char* outputFormat = "outputFormat";
 static constexpr const char* sampleRateMode = "outputSampleRateMode";
 static constexpr const char* packetDuration = "packetDurationMode";
