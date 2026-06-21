@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <utility>
 
 namespace pgstream
 {
@@ -40,6 +41,57 @@ juce::String jsonPropertyString(const juce::var& object, const char* name)
 
     return {};
 }
+
+int jsonPropertyInt(const juce::var& object, const char* name, int fallback)
+{
+    if (auto* dynamic = object.getDynamicObject())
+    {
+        const auto value = dynamic->getProperty(name);
+        if (value.isInt() || value.isInt64() || value.isDouble() || value.isBool())
+            return static_cast<int> (value);
+
+        const auto text = value.toString();
+        if (text.isNotEmpty())
+            return text.getIntValue();
+    }
+
+    return fallback;
+}
+
+OpusBitrateMode parseBrowserBitrateMode(const juce::var& message, OpusBitrateMode fallback)
+{
+    const auto preset = jsonPropertyString(message, "bitratePreset").toLowerCase();
+    const auto bps = jsonPropertyInt(message, "bitrateBps", 0);
+
+    if (preset.contains("128") || bps == 128000)
+        return OpusBitrateMode::goodPreview128;
+    if (preset.contains("192") || bps == 192000)
+        return OpusBitrateMode::veryGood192;
+    if (preset.contains("256") || bps == 256000)
+        return OpusBitrateMode::studioPreview256;
+    if (preset.contains("510") || bps == 510000)
+        return OpusBitrateMode::experimentalMax510;
+    if (preset.contains("320") || bps == 320000)
+        return OpusBitrateMode::highQuality320;
+
+    return fallback;
+}
+
+LatencyMode parseBrowserLatencyMode(const juce::var& message, LatencyMode fallback)
+{
+    const auto preset = jsonPropertyString(message, "latencyPreset").toLowerCase();
+
+    if (preset.contains("safe"))
+        return LatencyMode::safe;
+    if (preset.contains("ultra"))
+        return LatencyMode::ultraLowExperimental;
+    if (preset.contains("low"))
+        return LatencyMode::lowLatency;
+    if (preset.contains("balanced"))
+        return LatencyMode::balanced;
+
+    return fallback;
+}
 }
 
 NetworkServer::NetworkServer(AudioTapFifo& fifoToRead)
@@ -58,6 +110,12 @@ void NetworkServer::setSessionSampleRate(double sampleRate)
 {
     if (sampleRate > 1.0)
         sessionSampleRate.store(sampleRate, std::memory_order_release);
+}
+
+void NetworkServer::setActiveProfileCallback(std::function<void(OpusBitrateMode, LatencyMode)> callback)
+{
+    std::lock_guard<std::mutex> lock(callbackMutex);
+    activeProfileCallback = std::move(callback);
 }
 
 void NetworkServer::applyConfig(const StreamConfig& newConfig)
@@ -312,6 +370,26 @@ void NetworkServer::handleWebSocketText(mg_connection* connection, const char* d
 
     if (type == "webrtc-offer")
     {
+        auto changed = false;
+        OpusBitrateMode activeBitrateMode;
+        LatencyMode activeLatencyMode;
+        {
+            std::lock_guard<std::mutex> lock(configMutex);
+            activeBitrateMode = parseBrowserBitrateMode(message, config.opusBitrateMode);
+            activeLatencyMode = parseBrowserLatencyMode(message, config.latencyMode);
+            changed = activeBitrateMode != config.opusBitrateMode
+                || activeLatencyMode != config.latencyMode;
+
+            if (changed)
+            {
+                config.opusBitrateMode = activeBitrateMode;
+                config.latencyMode = activeLatencyMode;
+            }
+        }
+
+        if (changed)
+            notifyActiveProfileChanged(activeBitrateMode, activeLatencyMode);
+
         webrtcSender.handleOffer(connection, message);
         return;
     }
@@ -324,6 +402,18 @@ void NetworkServer::handleWebSocketText(mg_connection* connection, const char* d
 
     if (type == "webrtc-stop")
         webrtcSender.removeConnection(connection);
+}
+
+void NetworkServer::notifyActiveProfileChanged(OpusBitrateMode bitrateMode, LatencyMode latencyMode)
+{
+    std::function<void(OpusBitrateMode, LatencyMode)> callback;
+    {
+        std::lock_guard<std::mutex> lock(callbackMutex);
+        callback = activeProfileCallback;
+    }
+
+    if (callback)
+        callback(bitrateMode, latencyMode);
 }
 
 void NetworkServer::refreshLanSelection(int port)

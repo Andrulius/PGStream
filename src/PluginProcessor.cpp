@@ -10,6 +10,11 @@ PGStreamAudioProcessor::PGStreamAudioProcessor()
       parameters(*this, nullptr, "PGStreamState", createParameterLayout()),
       networkServer(tapFifo)
 {
+    networkServer.setActiveProfileCallback([this] (OpusBitrateMode bitrateMode, LatencyMode latencyMode)
+    {
+        requestProfileParameterSync(bitrateMode, latencyMode);
+    });
+
     parameters.addParameterListener(ParamIDs::streamEnabled, this);
     parameters.addParameterListener(ParamIDs::httpsPort, this);
     parameters.addParameterListener(ParamIDs::opusBitrate, this);
@@ -21,6 +26,7 @@ PGStreamAudioProcessor::PGStreamAudioProcessor()
 PGStreamAudioProcessor::~PGStreamAudioProcessor()
 {
     cancelPendingUpdate();
+    networkServer.setActiveProfileCallback({});
     parameters.removeParameterListener(ParamIDs::streamEnabled, this);
     parameters.removeParameterListener(ParamIDs::httpsPort, this);
     parameters.removeParameterListener(ParamIDs::opusBitrate, this);
@@ -97,6 +103,7 @@ void PGStreamAudioProcessor::parameterChanged(const juce::String&, float)
 
 void PGStreamAudioProcessor::handleAsyncUpdate()
 {
+    applyPendingProfileParameterSync();
     applyCurrentStreamConfig();
 }
 
@@ -105,6 +112,39 @@ void PGStreamAudioProcessor::applyCurrentStreamConfig()
     const auto config = configFromState(parameters, currentSampleRate.load(std::memory_order_acquire));
     tapEnabled.store(config.streamEnabled, std::memory_order_release);
     networkServer.applyConfig(config);
+}
+
+void PGStreamAudioProcessor::requestProfileParameterSync(OpusBitrateMode bitrateMode, LatencyMode latencyMode)
+{
+    pendingBitrateMode.store(static_cast<int> (bitrateMode), std::memory_order_release);
+    pendingLatencyMode.store(static_cast<int> (latencyMode), std::memory_order_release);
+    triggerAsyncUpdate();
+}
+
+void PGStreamAudioProcessor::applyPendingProfileParameterSync()
+{
+    const auto bitrateMode = pendingBitrateMode.exchange(-1, std::memory_order_acq_rel);
+    const auto latencyMode = pendingLatencyMode.exchange(-1, std::memory_order_acq_rel);
+
+    if (bitrateMode >= 0)
+    {
+        if (auto* parameter = parameters.getParameter(ParamIDs::opusBitrate))
+        {
+            const auto current = static_cast<int> (parameters.getRawParameterValue(ParamIDs::opusBitrate)->load());
+            if (current != bitrateMode)
+                parameter->setValueNotifyingHost(parameter->convertTo0to1(static_cast<float> (bitrateMode)));
+        }
+    }
+
+    if (latencyMode >= 0)
+    {
+        if (auto* parameter = parameters.getParameter(ParamIDs::latencyMode))
+        {
+            const auto current = static_cast<int> (parameters.getRawParameterValue(ParamIDs::latencyMode)->load());
+            if (current != latencyMode)
+                parameter->setValueNotifyingHost(parameter->convertTo0to1(static_cast<float> (latencyMode)));
+        }
+    }
 }
 }
 

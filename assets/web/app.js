@@ -37,8 +37,15 @@ const els = {
   autoActive: document.getElementById("autoActive"),
   autoMode: document.getElementById("autoMode"),
   autoProfile: document.getElementById("autoProfile"),
+  autoPhase: document.getElementById("autoPhase"),
   autoElapsed: document.getElementById("autoElapsed"),
+  autoStableTime: document.getElementById("autoStableTime"),
+  autoBaselinePacketsLost: document.getElementById("autoBaselinePacketsLost"),
+  autoCurrentPacketsLost: document.getElementById("autoCurrentPacketsLost"),
   autoLossDelta: document.getElementById("autoLossDelta"),
+  autoProfileIndex: document.getElementById("autoProfileIndex"),
+  activeEncoderBitrate: document.getElementById("activeEncoderBitrate"),
+  activeOpusFrame: document.getElementById("activeOpusFrame"),
   autoProfileChanges: document.getElementById("autoProfileChanges"),
   autoFifoUnderruns: document.getElementById("autoFifoUnderruns"),
   autoFinalProfile: document.getElementById("autoFinalProfile"),
@@ -48,8 +55,10 @@ const els = {
 const defaultWarning = els.warning.textContent.trim();
 const autoWarmupMs = 1000;
 const autoSuccessMs = 3000;
+const autoStatsUnavailableMs = 10000;
 const bitrateProfiles = [510000, 320000, 256000, 192000, 128000];
 const latencyProfiles = ["ultra", "low", "balanced", "safe"];
+const autoMaxProfiles = bitrateProfiles.length + latencyProfiles.length - 1;
 
 let socket = null;
 let pc = null;
@@ -71,6 +80,8 @@ const rtcStats = {
   codec: "opus/48000/2",
   packetsReceived: 0,
   packetsLost: 0,
+  inboundStatsId: null,
+  packetsReceivedIncreasing: false,
   jitterMs: 0,
   roundTripTimeMs: null,
   concealedSamples: null,
@@ -87,6 +98,7 @@ const server = {
   opusBitratePreset: "320 kb/s High Quality / Recommended",
   latencyPreset: "Balanced",
   latencyTarget: "about 40-90 ms",
+  opusFrameDurationMs: 20,
   senderQueueFillMs: 0,
   senderDroppedFrames: 0,
   fifoUnderruns: 0,
@@ -97,6 +109,11 @@ const server = {
   rtpFailures: 0
 };
 
+let activeProfile = makeProfile(320000, "balanced", "initial");
+let profileApplyInProgress = false;
+let profileApplyDeadlineMs = 0;
+let profileUserSelected = false;
+
 const autoNegotiation = {
   active: false,
   mode: "balanced",
@@ -104,14 +121,22 @@ const autoNegotiation = {
   bitrateIndex: 0,
   latencyIndex: 0,
   balanceNext: "latency",
+  inboundStatsId: null,
   baselinePacketsLost: null,
+  currentPacketsLost: null,
+  currentPacketsReceived: null,
+  phaseStartedAt: 0,
+  waitingStartedAt: 0,
   warmupStartedAt: 0,
   evaluationStartedAt: 0,
   elapsedMs: 0,
+  stableMs: 0,
   lossDelta: 0,
   profileChanges: 0,
+  profilesTested: 0,
   finalProfile: "-",
   lastFailure: "-",
+  readiness: "not started",
   transitioning: false
 };
 
@@ -125,6 +150,8 @@ function resetClientStats() {
   rtcStats.iceConnectionState = "closed";
   rtcStats.packetsReceived = 0;
   rtcStats.packetsLost = 0;
+  rtcStats.inboundStatsId = null;
+  rtcStats.packetsReceivedIncreasing = false;
   rtcStats.jitterMs = 0;
   rtcStats.roundTripTimeMs = null;
   rtcStats.concealedSamples = null;
@@ -151,6 +178,110 @@ function latencyLabel(value) {
   return "Balanced";
 }
 
+function latencyTarget(value) {
+  if (value === "safe") return "about 80-150 ms";
+  if (value === "low") return "about 25-60 ms";
+  if (value === "ultra") return "about 15-40 ms experimental";
+  return "about 40-90 ms";
+}
+
+function latencyFrameMs(value) {
+  if (value === "ultra") return 5;
+  if (value === "low") return 10;
+  return 20;
+}
+
+function normalizeBitrateBps(value) {
+  const parsed = Number(value);
+  return bitrateProfiles.includes(parsed) ? parsed : 320000;
+}
+
+function normalizeLatencyValue(value) {
+  const text = String(value || "").toLowerCase();
+  return latencyProfiles.includes(text) ? text : "balanced";
+}
+
+function latencyValueFromPreset(preset) {
+  const lower = String(preset || "").toLowerCase();
+  if (lower.includes("ultra")) return "ultra";
+  if (lower.includes("low")) return "low";
+  if (lower.includes("safe")) return "safe";
+  return "balanced";
+}
+
+function makeProfile(bitrateBps, latencyValue, source = "ui", target = null, frameMs = null) {
+  const normalizedBitrate = normalizeBitrateBps(bitrateBps);
+  const normalizedLatency = normalizeLatencyValue(latencyValue);
+  return {
+    bitrateBps: normalizedBitrate,
+    bitratePreset: bitrateLabel(normalizedBitrate),
+    latencyValue: normalizedLatency,
+    latencyPreset: latencyLabel(normalizedLatency),
+    latencyTarget: target || latencyTarget(normalizedLatency),
+    opusFrameDurationMs: Number.isFinite(Number(frameMs)) ? Number(frameMs) : latencyFrameMs(normalizedLatency),
+    source
+  };
+}
+
+function profileFromControls() {
+  return makeProfile(els.bitrateSelect.value, els.latencySelect.value, "controls");
+}
+
+function profileFromServerInfo(info) {
+  if (!info || !info.opusBitrateBps || !info.latencyPreset) return null;
+  return makeProfile(
+    info.opusBitrateBps,
+    latencyValueFromPreset(info.latencyPreset),
+    "server",
+    info.latencyTarget,
+    info.opusFrameDurationMs
+  );
+}
+
+function profileMatches(left, right) {
+  return !!left
+    && !!right
+    && normalizeBitrateBps(left.bitrateBps) === normalizeBitrateBps(right.bitrateBps)
+    && normalizeLatencyValue(left.latencyValue) === normalizeLatencyValue(right.latencyValue);
+}
+
+function setControlsFromProfile(profile) {
+  els.bitrateSelect.value = String(normalizeBitrateBps(profile.bitrateBps));
+  els.latencySelect.value = normalizeLatencyValue(profile.latencyValue);
+}
+
+function setActiveProfile(profile, options = {}) {
+  activeProfile = makeProfile(
+    profile.bitrateBps,
+    profile.latencyValue,
+    profile.source || "ui",
+    profile.latencyTarget,
+    profile.opusFrameDurationMs
+  );
+
+  if (options.updateControls !== false) {
+    setControlsFromProfile(activeProfile);
+  }
+}
+
+function activeProfileLabel(profile = activeProfile) {
+  return `${profile.bitratePreset} / ${profile.latencyPreset}`;
+}
+
+function formatPacketCount(value) {
+  return Number.isFinite(value) ? String(value) : "-";
+}
+
+function formatBitrateKbps(value) {
+  const bps = Number(value);
+  return Number.isFinite(bps) ? `${(bps / 1000).toFixed(0)} kb/s` : "-";
+}
+
+function markProfileApplyPending() {
+  profileApplyInProgress = true;
+  profileApplyDeadlineMs = performance.now() + 8000;
+}
+
 function autoModeLabel(value) {
   if (value === "quality") return "Quality Priority";
   if (value === "latency") return "Latency Priority";
@@ -158,21 +289,36 @@ function autoModeLabel(value) {
 }
 
 function profileLabel(bitrateIndex = autoNegotiation.bitrateIndex, latencyIndex = autoNegotiation.latencyIndex) {
-  return `${bitrateLabel(bitrateProfiles[bitrateIndex])} / ${latencyLabel(latencyProfiles[latencyIndex])}`;
+  return activeProfileLabel(makeProfile(bitrateProfiles[bitrateIndex], latencyProfiles[latencyIndex], "auto"));
+}
+
+function profileFromAutoIndices() {
+  return makeProfile(
+    bitrateProfiles[autoNegotiation.bitrateIndex],
+    latencyProfiles[autoNegotiation.latencyIndex],
+    "auto"
+  );
 }
 
 function applyAutoProfile() {
-  els.bitrateSelect.value = String(bitrateProfiles[autoNegotiation.bitrateIndex]);
-  els.latencySelect.value = latencyProfiles[autoNegotiation.latencyIndex];
+  setActiveProfile(profileFromAutoIndices());
 }
 
 function resetAutoMeasurement(state = "connecting") {
+  const now = performance.now();
   autoNegotiation.state = state;
+  autoNegotiation.inboundStatsId = null;
   autoNegotiation.baselinePacketsLost = null;
+  autoNegotiation.currentPacketsLost = null;
+  autoNegotiation.currentPacketsReceived = null;
+  autoNegotiation.phaseStartedAt = now;
+  autoNegotiation.waitingStartedAt = now;
   autoNegotiation.warmupStartedAt = 0;
   autoNegotiation.evaluationStartedAt = 0;
   autoNegotiation.elapsedMs = 0;
+  autoNegotiation.stableMs = 0;
   autoNegotiation.lossDelta = 0;
+  autoNegotiation.readiness = "waiting for peer";
 }
 
 function nextAutoProfile() {
@@ -202,7 +348,6 @@ function nextAutoProfile() {
 
     if (!atSafestLatency) {
       autoNegotiation.latencyIndex += 1;
-      autoNegotiation.bitrateIndex = 0;
       return true;
     }
 
@@ -232,9 +377,81 @@ function setAutoWarning(text) {
   els.warning.textContent = text || defaultWarning;
 }
 
+function peerReadyReason(inbound) {
+  const connectionState = pc ? pc.connectionState : rtcStats.connectionState;
+  const iceState = pc ? pc.iceConnectionState : rtcStats.iceConnectionState;
+
+  if (connectionState !== "connected") {
+    return `waiting for peer connection (${connectionState || "unknown"})`;
+  }
+
+  if (iceState !== "connected" && iceState !== "completed") {
+    return `waiting for ICE (${iceState || "unknown"})`;
+  }
+
+  if (!remoteTrack || remoteTrack.readyState !== "live") {
+    return "waiting for live remote audio track";
+  }
+
+  if (!inbound) {
+    return "waiting for inbound-rtp audio stats";
+  }
+
+  if (!Number.isFinite(inbound.packetsLost)) {
+    return "waiting for readable packetsLost";
+  }
+
+  if (!Number.isFinite(inbound.packetsReceived)) {
+    return "waiting for readable packetsReceived";
+  }
+
+  if (inbound.packetsReceived <= 0) {
+    return "waiting for first received audio packet";
+  }
+
+  if (!inbound.packetsReceivedIncreasing) {
+    return "waiting for packetsReceived to increase";
+  }
+
+  return "";
+}
+
+function stopAutoNegotiationForStats(reason) {
+  autoNegotiation.active = false;
+  autoNegotiation.state = "stats unavailable";
+  autoNegotiation.lastFailure = reason;
+  autoNegotiation.readiness = reason;
+  setAutoWarning(`Auto negotiation stopped: ${reason}.`);
+  renderUi();
+}
+
+function beginAutoWaiting(reason) {
+  const now = performance.now();
+  if (autoNegotiation.state !== "waiting for peer") {
+    autoNegotiation.state = "waiting for peer";
+    autoNegotiation.phaseStartedAt = now;
+    autoNegotiation.waitingStartedAt = now;
+    autoNegotiation.elapsedMs = 0;
+    autoNegotiation.stableMs = 0;
+    autoNegotiation.lossDelta = 0;
+    autoNegotiation.inboundStatsId = null;
+    autoNegotiation.baselinePacketsLost = null;
+  }
+
+  autoNegotiation.readiness = reason;
+  autoNegotiation.elapsedMs = now - autoNegotiation.phaseStartedAt;
+
+  if (now - autoNegotiation.waitingStartedAt >= autoStatsUnavailableMs) {
+    stopAutoNegotiationForStats(reason);
+  } else {
+    renderUi();
+  }
+}
+
 async function reconnectForAutoProfile() {
   autoNegotiation.transitioning = true;
   resetAutoMeasurement("reconnecting");
+  markProfileApplyPending();
   renderUi();
 
   try {
@@ -244,7 +461,7 @@ async function reconnectForAutoProfile() {
 
     if (autoNegotiation.active) {
       await startAudio({ preserveAuto: true });
-      resetAutoMeasurement("connecting");
+      resetAutoMeasurement("waiting for peer");
       setAutoWarning(`Auto negotiation testing: ${profileLabel()}`);
     }
   } finally {
@@ -265,6 +482,7 @@ async function startAutoNegotiation() {
   autoNegotiation.latencyIndex = 0;
   autoNegotiation.balanceNext = "latency";
   autoNegotiation.profileChanges = 0;
+  autoNegotiation.profilesTested = 1;
   autoNegotiation.finalProfile = "-";
   autoNegotiation.lastFailure = "-";
   resetAutoMeasurement("starting");
@@ -277,19 +495,22 @@ function completeAutoNegotiation() {
   autoNegotiation.active = false;
   autoNegotiation.state = "complete";
   autoNegotiation.finalProfile = profileLabel();
+  profileUserSelected = true;
   setAutoWarning(`Auto negotiation complete: ${autoNegotiation.finalProfile}`);
   renderUi();
 }
 
 async function failAutoNegotiation(delta) {
-  autoNegotiation.lastFailure = `${profileLabel()} lost ${delta} packet${delta === 1 ? "" : "s"}`;
+  autoNegotiation.state = "profile failed";
+  autoNegotiation.lastFailure = `${profileLabel()} lost ${delta} packet${delta === 1 ? "" : "s"} during measurement`;
+  renderUi();
 
   if (!nextAutoProfile()) {
     autoNegotiation.bitrateIndex = bitrateProfiles.length - 1;
     autoNegotiation.latencyIndex = latencyProfiles.length - 1;
     applyAutoProfile();
     autoNegotiation.active = false;
-    autoNegotiation.state = "failed";
+    autoNegotiation.state = "failed all profiles";
     autoNegotiation.finalProfile = profileLabel();
     setAutoWarning("Auto negotiation could not find a zero-loss profile. Using safest available settings.");
     renderUi();
@@ -297,6 +518,7 @@ async function failAutoNegotiation(delta) {
   }
 
   autoNegotiation.profileChanges += 1;
+  autoNegotiation.profilesTested += 1;
   applyAutoProfile();
   setAutoWarning(`Auto negotiation retrying: ${profileLabel()}`);
   await reconnectForAutoProfile();
@@ -308,42 +530,85 @@ function cancelAutoNegotiation(reason = "cancelled") {
   autoNegotiation.active = false;
   autoNegotiation.state = reason;
   autoNegotiation.finalProfile = reason === "cancelled" ? "-" : autoNegotiation.finalProfile;
+  autoNegotiation.readiness = reason;
   setAutoWarning(reason === "cancelled" ? "Auto negotiation cancelled." : defaultWarning);
   renderUi();
 }
 
 async function updateAutoNegotiation(inbound) {
-  if (!autoNegotiation.active || autoNegotiation.transitioning || !inbound) return;
+  if (!autoNegotiation.active || autoNegotiation.transitioning) return;
 
   const now = performance.now();
-  const currentPacketsLost = Number(inbound.packetsLost || 0);
+  const notReadyReason = peerReadyReason(inbound);
+  if (notReadyReason) {
+    beginAutoWaiting(notReadyReason);
+    return;
+  }
 
-  if (autoNegotiation.state === "connecting" || autoNegotiation.state === "starting" || autoNegotiation.state === "reconnecting") {
+  const currentPacketsLost = inbound.packetsLost;
+  autoNegotiation.currentPacketsLost = currentPacketsLost;
+  autoNegotiation.currentPacketsReceived = inbound.packetsReceived;
+  autoNegotiation.readiness = "ready";
+
+  if (autoNegotiation.state === "connecting"
+      || autoNegotiation.state === "starting"
+      || autoNegotiation.state === "reconnecting"
+      || autoNegotiation.state === "waiting for peer"
+      || autoNegotiation.state === "profile failed") {
     autoNegotiation.state = "warmup";
+    autoNegotiation.phaseStartedAt = now;
+    autoNegotiation.inboundStatsId = inbound.id;
     autoNegotiation.warmupStartedAt = now;
     autoNegotiation.elapsedMs = 0;
+    autoNegotiation.stableMs = 0;
     autoNegotiation.lossDelta = 0;
     renderUi();
     return;
   }
 
   if (autoNegotiation.state === "warmup") {
+    if (inbound.id !== autoNegotiation.inboundStatsId) {
+      resetAutoMeasurement("waiting for peer");
+      autoNegotiation.readiness = "inbound stats source changed before baseline";
+      renderUi();
+      return;
+    }
+
     autoNegotiation.elapsedMs = now - autoNegotiation.warmupStartedAt;
     if (autoNegotiation.elapsedMs >= autoWarmupMs) {
-      autoNegotiation.state = "evaluating";
+      autoNegotiation.state = "measuring";
+      autoNegotiation.phaseStartedAt = now;
       autoNegotiation.baselinePacketsLost = currentPacketsLost;
       autoNegotiation.evaluationStartedAt = now;
       autoNegotiation.elapsedMs = 0;
+      autoNegotiation.stableMs = 0;
       autoNegotiation.lossDelta = 0;
     }
     renderUi();
     return;
   }
 
-  if (autoNegotiation.state !== "evaluating") return;
+  if (autoNegotiation.state !== "measuring") return;
+
+  if (inbound.id !== autoNegotiation.inboundStatsId) {
+    resetAutoMeasurement("waiting for peer");
+    autoNegotiation.readiness = "inbound stats source changed during measurement";
+    renderUi();
+    return;
+  }
 
   autoNegotiation.elapsedMs = now - autoNegotiation.evaluationStartedAt;
-  autoNegotiation.lossDelta = Math.max(0, currentPacketsLost - autoNegotiation.baselinePacketsLost);
+  const delta = currentPacketsLost - autoNegotiation.baselinePacketsLost;
+
+  if (!Number.isFinite(delta) || delta < 0) {
+    resetAutoMeasurement("waiting for peer");
+    autoNegotiation.readiness = "packetsLost counter reset before evaluation completed";
+    renderUi();
+    return;
+  }
+
+  autoNegotiation.lossDelta = delta;
+  autoNegotiation.stableMs = delta === 0 ? autoNegotiation.elapsedMs : 0;
 
   if (autoNegotiation.lossDelta > 0) {
     await failAutoNegotiation(autoNegotiation.lossDelta);
@@ -382,18 +647,19 @@ function applyInfo(info) {
   if (info.opusBitratePreset) server.opusBitratePreset = info.opusBitratePreset;
   if (info.latencyPreset) server.latencyPreset = info.latencyPreset;
   if (info.latencyTarget) server.latencyTarget = info.latencyTarget;
+  if (info.opusFrameDurationMs) server.opusFrameDurationMs = Number(info.opusFrameDurationMs);
 
-  if (!running && !autoNegotiation.active) {
-    if (info.opusBitrateBps) {
-      els.bitrateSelect.value = String(info.opusBitrateBps);
+  const serverProfile = profileFromServerInfo(info);
+  if (serverProfile) {
+    const now = performance.now();
+    if (profileApplyInProgress && profileMatches(serverProfile, activeProfile)) {
+      profileApplyInProgress = false;
+    } else if (profileApplyInProgress && now >= profileApplyDeadlineMs) {
+      profileApplyInProgress = false;
     }
 
-    if (info.latencyPreset) {
-      const lower = String(info.latencyPreset).toLowerCase();
-      els.latencySelect.value = lower.includes("ultra") ? "ultra"
-        : lower.includes("low") ? "low"
-        : lower.includes("safe") ? "safe"
-        : "balanced";
+    if (!autoNegotiation.active && !profileApplyInProgress && (running || !profileUserSelected)) {
+      setActiveProfile(serverProfile);
     }
   }
 
@@ -515,6 +781,7 @@ async function startWebRtc() {
   rtcStats.codec = "opus/48000/2";
   remoteStream = new MediaStream();
   els.remoteAudio.srcObject = remoteStream;
+  markProfileApplyPending();
 
   pc = new RTCPeerConnection({ iceServers: [] });
   pc.addTransceiver("audio", { direction: "recvonly" });
@@ -565,15 +832,19 @@ async function startWebRtc() {
       type: "webrtc-offer",
       sdpType: pc.localDescription.type,
       sdp: pc.localDescription.sdp,
-      bitrateBps: Number(els.bitrateSelect.value),
-      bitratePreset: bitrateLabel(Number(els.bitrateSelect.value)),
-      latencyPreset: latencyLabel(els.latencySelect.value)
+      bitrateBps: activeProfile.bitrateBps,
+      bitratePreset: activeProfile.bitratePreset,
+      latencyPreset: activeProfile.latencyPreset
     });
   };
 }
 
 async function startAudio(options = {}) {
   if (running || stopping) return;
+
+  if (!autoNegotiation.active) {
+    setActiveProfile(profileFromControls(), { updateControls: false });
+  }
 
   resetClientStats();
   running = true;
@@ -601,6 +872,7 @@ async function stopAudio(finalStatus = "stopped", options = {}) {
 
   if (!options.preserveAuto) {
     cancelAutoNegotiation("cancelled");
+    profileApplyInProgress = false;
   }
 
   stopping = true;
@@ -646,20 +918,71 @@ async function stopAudio(finalStatus = "stopped", options = {}) {
   renderUi();
 }
 
+function finiteNumberOrNull(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function nonNegativeNumberOrNull(value) {
+  const parsed = finiteNumberOrNull(value);
+  return parsed !== null && parsed >= 0 ? parsed : null;
+}
+
+function selectInboundAudioStats(report) {
+  const candidates = [];
+  report.forEach((stat) => {
+    if (stat.type === "inbound-rtp" && stat.kind === "audio" && !stat.isRemote) {
+      candidates.push(stat);
+    }
+  });
+
+  if (candidates.length === 0) return null;
+
+  candidates.sort((left, right) => {
+    const rightPackets = nonNegativeNumberOrNull(right.packetsReceived) || 0;
+    const leftPackets = nonNegativeNumberOrNull(left.packetsReceived) || 0;
+    return rightPackets - leftPackets;
+  });
+
+  return candidates[0];
+}
+
+function inboundSnapshot(stat) {
+  if (!stat) return null;
+
+  const packetsReceived = nonNegativeNumberOrNull(stat.packetsReceived);
+  const packetsLost = finiteNumberOrNull(stat.packetsLost);
+  const sameStatsSource = rtcStats.inboundStatsId === stat.id;
+  const packetsReceivedIncreasing = sameStatsSource
+    && packetsReceived !== null
+    && Number.isFinite(rtcStats.packetsReceived)
+    && packetsReceived > rtcStats.packetsReceived;
+
+  return {
+    id: stat.id,
+    bytesReceived: nonNegativeNumberOrNull(stat.bytesReceived),
+    packetsReceived,
+    packetsLost,
+    packetsReceivedIncreasing,
+    jitter: finiteNumberOrNull(stat.jitter),
+    concealedSamples: stat.concealedSamples ?? stat.concealedAudio ?? null,
+    jitterBufferDelay: finiteNumberOrNull(stat.jitterBufferDelay),
+    jitterBufferTargetDelay: finiteNumberOrNull(stat.jitterBufferTargetDelay)
+  };
+}
+
 async function refreshRtcStats() {
   if (!pc) return;
 
   try {
-    const report = await pc.getStats();
-    let inbound = null;
+    const statsPeer = pc;
+    const report = await statsPeer.getStats();
+    if (statsPeer !== pc) return;
+
     let codec = null;
     let selectedPair = null;
 
     report.forEach((stat) => {
-      if (stat.type === "inbound-rtp" && stat.kind === "audio" && !stat.isRemote) {
-        inbound = stat;
-      }
-
       if (stat.type === "codec" && String(stat.mimeType || "").toLowerCase().includes("opus")) {
         codec = stat;
       }
@@ -677,24 +1000,38 @@ async function refreshRtcStats() {
       rtcStats.roundTripTimeMs = selectedPair.currentRoundTripTime * 1000;
     }
 
-    if (!inbound) return;
+    const inbound = inboundSnapshot(selectInboundAudioStats(report));
+    if (!inbound) {
+      updateAutoNegotiation(null).catch((error) => {
+        autoNegotiation.active = false;
+        autoNegotiation.state = "error";
+        autoNegotiation.lastFailure = error.message || "auto negotiation error";
+        els.warning.textContent = autoNegotiation.lastFailure;
+        renderUi();
+      });
+      return;
+    }
 
     const now = performance.now();
-    const bytes = Number(inbound.bytesReceived || 0);
-    if (rtcStats.lastBytesAt > 0 && now > rtcStats.lastBytesAt && bytes >= rtcStats.lastBytes) {
-      rtcStats.actualBitrateKbps = ((bytes - rtcStats.lastBytes) * 8) / (now - rtcStats.lastBytesAt);
+    if (inbound.bytesReceived !== null
+        && rtcStats.lastBytesAt > 0
+        && now > rtcStats.lastBytesAt
+        && inbound.bytesReceived >= rtcStats.lastBytes) {
+      rtcStats.actualBitrateKbps = ((inbound.bytesReceived - rtcStats.lastBytes) * 8) / (now - rtcStats.lastBytesAt);
     }
-    rtcStats.lastBytes = bytes;
+    rtcStats.lastBytes = inbound.bytesReceived === null ? rtcStats.lastBytes : inbound.bytesReceived;
     rtcStats.lastBytesAt = now;
 
-    rtcStats.packetsReceived = Number(inbound.packetsReceived || 0);
-    rtcStats.packetsLost = Number(inbound.packetsLost || 0);
-    rtcStats.jitterMs = Number(inbound.jitter || 0) * 1000;
-    rtcStats.concealedSamples = inbound.concealedSamples ?? inbound.concealedAudio ?? null;
-    rtcStats.jitterBufferDelayMs = typeof inbound.jitterBufferDelay === "number"
+    rtcStats.inboundStatsId = inbound.id;
+    rtcStats.packetsReceivedIncreasing = inbound.packetsReceivedIncreasing;
+    rtcStats.packetsReceived = inbound.packetsReceived;
+    rtcStats.packetsLost = inbound.packetsLost;
+    rtcStats.jitterMs = inbound.jitter === null ? 0 : inbound.jitter * 1000;
+    rtcStats.concealedSamples = inbound.concealedSamples;
+    rtcStats.jitterBufferDelayMs = inbound.jitterBufferDelay !== null
       ? inbound.jitterBufferDelay * 1000
       : null;
-    rtcStats.jitterBufferTargetDelayMs = typeof inbound.jitterBufferTargetDelay === "number"
+    rtcStats.jitterBufferTargetDelayMs = inbound.jitterBufferTargetDelay !== null
       ? inbound.jitterBufferTargetDelay * 1000
       : null;
 
@@ -714,20 +1051,20 @@ function renderUi() {
   els.connection.textContent = client.status;
   els.transport.textContent = "WebRTC Opus";
   els.codec.textContent = rtcStats.codec;
-  els.bitrate.textContent = bitrateLabel(Number(els.bitrateSelect.value));
+  els.bitrate.textContent = activeProfile.bitratePreset;
 
   els.rtcConnectionState.textContent = pc ? pc.connectionState : rtcStats.connectionState;
   els.iceConnectionState.textContent = pc ? pc.iceConnectionState : rtcStats.iceConnectionState;
   els.actualBitrate.textContent = `${rtcStats.actualBitrateKbps.toFixed(1)} kb/s`;
-  els.packetsReceived.textContent = String(rtcStats.packetsReceived);
-  els.packetsLost.textContent = String(rtcStats.packetsLost);
+  els.packetsReceived.textContent = formatPacketCount(rtcStats.packetsReceived);
+  els.packetsLost.textContent = formatPacketCount(rtcStats.packetsLost);
   els.jitter.textContent = `${rtcStats.jitterMs.toFixed(1)} ms`;
   els.roundTripTime.textContent = rtcStats.roundTripTimeMs === null ? "-" : `${rtcStats.roundTripTimeMs.toFixed(1)} ms`;
   els.concealedSamples.textContent = rtcStats.concealedSamples === null ? "-" : String(rtcStats.concealedSamples);
   els.jitterBufferDelay.textContent = rtcStats.jitterBufferDelayMs === null ? "-" : `${rtcStats.jitterBufferDelayMs.toFixed(1)} ms`;
   els.jitterBufferTargetDelay.textContent = rtcStats.jitterBufferTargetDelayMs === null ? "-" : `${rtcStats.jitterBufferTargetDelayMs.toFixed(1)} ms`;
   els.remoteTrackState.textContent = remoteTrack ? `${remoteTrack.readyState} ${remoteTrack.muted ? "muted" : "live"}` : "none";
-  els.latencyPreset.textContent = `${latencyLabel(els.latencySelect.value)} (${server.latencyTarget})`;
+  els.latencyPreset.textContent = `${activeProfile.latencyPreset} (${activeProfile.latencyTarget})`;
 
   els.senderQueueFill.textContent = `${server.senderQueueFillMs.toFixed(1)} ms`;
   els.senderDroppedFrames.textContent = String(server.senderDroppedFrames);
@@ -740,21 +1077,63 @@ function renderUi() {
 
   els.autoActive.textContent = autoNegotiation.active ? "active" : "inactive";
   els.autoMode.textContent = autoModeLabel(autoNegotiation.mode);
-  els.autoProfile.textContent = autoNegotiation.active || autoNegotiation.state === "complete" || autoNegotiation.state === "failed"
+  els.autoProfile.textContent = autoNegotiation.active
+    || autoNegotiation.state === "complete"
+    || autoNegotiation.state === "failed all profiles"
     ? profileLabel()
     : "-";
+  els.autoPhase.textContent = autoNegotiation.state;
   els.autoElapsed.textContent = `${(autoNegotiation.elapsedMs / 1000).toFixed(1)} s`;
+  els.autoStableTime.textContent = `${(autoNegotiation.stableMs / 1000).toFixed(1)} s`;
+  els.autoBaselinePacketsLost.textContent = formatPacketCount(autoNegotiation.baselinePacketsLost);
+  els.autoCurrentPacketsLost.textContent = formatPacketCount(autoNegotiation.currentPacketsLost);
   els.autoLossDelta.textContent = String(autoNegotiation.lossDelta);
+  els.autoProfileIndex.textContent = autoNegotiation.profilesTested > 0
+    ? `${autoNegotiation.profilesTested}/${autoMaxProfiles}`
+    : `0/${autoMaxProfiles}`;
+  els.activeEncoderBitrate.textContent = `${server.opusBitratePreset} (${formatBitrateKbps(server.opusBitrateBps)})`;
+  els.activeOpusFrame.textContent = `${server.opusFrameDurationMs} ms`;
   els.autoProfileChanges.textContent = String(autoNegotiation.profileChanges);
   els.autoFifoUnderruns.textContent = String(server.fifoUnderruns);
   els.autoFinalProfile.textContent = autoNegotiation.finalProfile;
-  els.autoLastFailure.textContent = autoNegotiation.lastFailure;
+  els.autoLastFailure.textContent = autoNegotiation.lastFailure === "-" ? autoNegotiation.readiness : autoNegotiation.lastFailure;
 
-  els.bitrateSelect.disabled = autoNegotiation.active;
-  els.latencySelect.disabled = autoNegotiation.active;
+  els.bitrateSelect.disabled = autoNegotiation.active || profileApplyInProgress;
+  els.latencySelect.disabled = autoNegotiation.active || profileApplyInProgress;
   els.autoModeSelect.disabled = autoNegotiation.active;
   els.autoButton.textContent = autoNegotiation.active ? "Cancel Auto" : "Auto Negotiate";
 }
+
+async function reconnectForManualProfileChange() {
+  if (!running || stopping || autoNegotiation.active) return;
+
+  markProfileApplyPending();
+  els.warning.textContent = `Applying profile: ${activeProfileLabel()}`;
+  renderUi();
+
+  await stopAudio("profile reconnect", { preserveAuto: true });
+  await startAudio({ preserveAuto: true });
+}
+
+function handleManualProfileChange() {
+  if (autoNegotiation.active) return;
+
+  profileUserSelected = true;
+  setActiveProfile(profileFromControls(), { updateControls: false });
+
+  if (running && !stopping) {
+    reconnectForManualProfileChange().catch((error) => {
+      profileApplyInProgress = false;
+      els.warning.textContent = error.message || "Profile reconnect failed";
+      renderUi();
+    });
+  } else {
+    renderUi();
+  }
+}
+
+els.bitrateSelect.addEventListener("change", handleManualProfileChange);
+els.latencySelect.addEventListener("change", handleManualProfileChange);
 
 els.start.addEventListener("click", () => {
   if (running) {

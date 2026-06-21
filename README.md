@@ -66,7 +66,7 @@ The plugin editor About panel opens from the small `i` button and closes with it
 
 ## Browser Auto Negotiation
 
-The browser page can automatically test the existing **Opus Bitrate** and **Latency Mode** controls. It starts from 510 kb/s with Ultra Low latency, reconnects when a profile changes, waits for a 1 second warm-up, then requires 3 continuous seconds with zero browser WebRTC packet loss delta.
+The browser page can automatically test the existing **Opus Bitrate** and **Latency Mode** controls. It starts from 510 kb/s with Ultra Low latency, reconnects when a profile changes, waits until the peer connection is connected, the remote audio track is live, inbound audio stats exist, `packetsReceived` is increasing, and `packetsLost` is readable. It then waits for a 1 second warm-up and requires 3 continuous seconds with zero browser WebRTC packet loss delta.
 
 The decision input is only browser WebRTC `packetsLost` delta:
 
@@ -74,7 +74,7 @@ The decision input is only browser WebRTC `packetsLost` delta:
 packetLossDelta = current packetsLost - baseline packetsLost
 ```
 
-The baseline is captured after warm-up. A tested profile succeeds only when `packetLossDelta == 0` for the full 3 second evaluation window. Any `packetLossDelta > 0` after warm-up rejects that profile.
+The baseline is captured after readiness and warm-up, separately for each tested peer/profile. A tested profile succeeds only when `packetLossDelta == 0` for the full 3 second evaluation window. Any `packetLossDelta > 0` after warm-up rejects that profile. Missing, undefined, or non-numeric packet-loss stats are treated as stats not ready; they do not reject a profile.
 
 Modes choose the next existing profile as follows:
 
@@ -82,7 +82,7 @@ Modes choose the next existing profile as follows:
 - **Latency Priority**: lower bitrate first, increase Latency Mode only when bitrate is already at the lowest setting.
 - **Balanced**: alternate one latency step safer, then one bitrate step lower.
 
-If every profile fails, PGStream selects the safest available settings: 128 kb/s with Safe latency. Plugin FIFO underruns are displayed as diagnostics only; they never trigger Auto Negotiation profile changes and do not affect the final selected profile.
+If stats remain unavailable, Auto Negotiation stops with a diagnostic instead of degrading blindly. If every valid profile fails, PGStream selects the safest available settings: 128 kb/s with Safe latency. Plugin FIFO underruns are displayed as diagnostics only; they never trigger Auto Negotiation profile changes and do not affect the final selected profile.
 
 ## Nerd Diagnostics
 
@@ -103,7 +103,7 @@ Browser-side diagnostics show:
 - **Remote track**: browser audio track state.
 - **Signaling socket**: the WS connection used only for WebRTC signaling.
 - **RTP attempts/sent/failures**: plugin-side sender counters mirrored from `/info`.
-- **Auto Negotiation**: active state, selected mode, tested profile, elapsed warm-up/evaluation time, browser packet loss delta, profile changes, final selected profile, last rejected profile, and FIFO underruns as a separate diagnostic.
+- **Auto Negotiation**: active state, selected mode, tested profile, phase, baseline/current browser `packetsLost`, packet loss delta, stable zero-loss time, active encoder bitrate, active Opus frame duration, profile changes, final selected profile, last rejected profile, and FIFO underruns as a separate diagnostic.
 
 ## LAN IP Selection
 

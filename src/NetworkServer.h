@@ -7,6 +7,7 @@
 #include "WebRtcAudioSender.h"
 #include <juce_core/juce_core.h>
 #include <atomic>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -24,6 +25,7 @@ public:
 
     void applyConfig(const StreamConfig& newConfig);
     void setSessionSampleRate(double sampleRate);
+    void setActiveProfileCallback(std::function<void(OpusBitrateMode, LatencyMode)> callback);
     StreamStats getStats() const;
 
 private:
@@ -44,10 +46,14 @@ private:
     static int logHandler(const mg_connection*, const char*);
 
     void handleWebSocketText(mg_connection* connection, const char* data, size_t dataLen);
+    void notifyActiveProfileChanged(OpusBitrateMode bitrateMode, LatencyMode latencyMode);
 
     AudioTapFifo& fifo;
     mutable std::mutex configMutex;
     StreamConfig config;
+
+    mutable std::mutex callbackMutex;
+    std::function<void(OpusBitrateMode, LatencyMode)> activeProfileCallback;
 
     mutable std::mutex statusMutex;
     juce::String statusText { "disabled" };
