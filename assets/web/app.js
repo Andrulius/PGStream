@@ -69,6 +69,10 @@ let serverTimer = null;
 let rtcStatsTimer = null;
 let running = false;
 let stopping = false;
+let suppressControlEvents = 0;
+let uiSyncSuppressedEventCount = 0;
+let lastStateRevision = 0;
+let lastStateUpdateReceivedTimestamp = "-";
 
 const client = {
   status: "stopped"
@@ -79,12 +83,16 @@ const rtcStats = {
   iceConnectionState: "closed",
   codec: "opus/48000/2",
   packetsReceived: 0,
+  bytesReceived: 0,
   packetsLost: 0,
+  packetsDiscarded: null,
   inboundStatsId: null,
   packetsReceivedIncreasing: false,
   jitterMs: 0,
   roundTripTimeMs: null,
   concealedSamples: null,
+  concealmentEvents: null,
+  audioLevel: null,
   jitterBufferDelayMs: null,
   jitterBufferTargetDelayMs: null,
   actualBitrateKbps: 0,
@@ -97,6 +105,14 @@ const server = {
   opusBitrateBps: 320000,
   opusBitratePreset: "320 kb/s High Quality / Recommended",
   latencyPreset: "Balanced",
+  selectedOpusBitrateBps: 320000,
+  selectedOpusBitratePreset: "320 kb/s High Quality / Recommended",
+  selectedLatencyPreset: "Balanced",
+  stateRevision: 0,
+  stateOrigin: "startup",
+  lastAdaptationReason: "startup",
+  lastAdaptationTimestamp: "-",
+  activePlayoutDelayHintMs: 80,
   latencyTarget: "about 40-90 ms",
   opusFrameDurationMs: 20,
   senderQueueFillMs: 0,
@@ -149,12 +165,16 @@ function resetClientStats() {
   rtcStats.connectionState = "closed";
   rtcStats.iceConnectionState = "closed";
   rtcStats.packetsReceived = 0;
+  rtcStats.bytesReceived = 0;
   rtcStats.packetsLost = 0;
+  rtcStats.packetsDiscarded = null;
   rtcStats.inboundStatsId = null;
   rtcStats.packetsReceivedIncreasing = false;
   rtcStats.jitterMs = 0;
   rtcStats.roundTripTimeMs = null;
   rtcStats.concealedSamples = null;
+  rtcStats.concealmentEvents = null;
+  rtcStats.audioLevel = null;
   rtcStats.jitterBufferDelayMs = null;
   rtcStats.jitterBufferTargetDelayMs = null;
   rtcStats.actualBitrateKbps = 0;
@@ -186,7 +206,7 @@ function latencyTarget(value) {
 }
 
 function latencyFrameMs(value) {
-  if (value === "ultra") return 5;
+  if (value === "ultra") return 10;
   if (value === "low") return 10;
   return 20;
 }
@@ -246,8 +266,13 @@ function profileMatches(left, right) {
 }
 
 function setControlsFromProfile(profile) {
-  els.bitrateSelect.value = String(normalizeBitrateBps(profile.bitrateBps));
-  els.latencySelect.value = normalizeLatencyValue(profile.latencyValue);
+  suppressControlEvents += 1;
+  try {
+    els.bitrateSelect.value = String(normalizeBitrateBps(profile.bitrateBps));
+    els.latencySelect.value = normalizeLatencyValue(profile.latencyValue);
+  } finally {
+    suppressControlEvents -= 1;
+  }
 }
 
 function setActiveProfile(profile, options = {}) {
@@ -645,9 +670,17 @@ function applyInfo(info) {
   if (info.transport) server.transport = info.transport;
   if (info.opusBitrateBps) server.opusBitrateBps = Number(info.opusBitrateBps);
   if (info.opusBitratePreset) server.opusBitratePreset = info.opusBitratePreset;
+  if (info.selectedOpusBitrateBps) server.selectedOpusBitrateBps = Number(info.selectedOpusBitrateBps);
+  if (info.selectedOpusBitratePreset) server.selectedOpusBitratePreset = info.selectedOpusBitratePreset;
+  if (info.selectedLatencyPreset) server.selectedLatencyPreset = info.selectedLatencyPreset;
   if (info.latencyPreset) server.latencyPreset = info.latencyPreset;
   if (info.latencyTarget) server.latencyTarget = info.latencyTarget;
   if (info.opusFrameDurationMs) server.opusFrameDurationMs = Number(info.opusFrameDurationMs);
+  if (info.activePlayoutDelayHintMs) server.activePlayoutDelayHintMs = Number(info.activePlayoutDelayHintMs);
+  if (Number.isFinite(Number(info.stateRevision))) server.stateRevision = Number(info.stateRevision);
+  if (info.stateOrigin) server.stateOrigin = info.stateOrigin;
+  if (info.lastAdaptationReason) server.lastAdaptationReason = info.lastAdaptationReason;
+  if (info.lastAdaptationTimestamp) server.lastAdaptationTimestamp = info.lastAdaptationTimestamp;
 
   const serverProfile = profileFromServerInfo(info);
   if (serverProfile) {
@@ -658,7 +691,7 @@ function applyInfo(info) {
       profileApplyInProgress = false;
     }
 
-    if (!autoNegotiation.active && !profileApplyInProgress && (running || !profileUserSelected)) {
+    if (!profileApplyInProgress || profileMatches(serverProfile, activeProfile)) {
       setActiveProfile(serverProfile);
     }
   }
@@ -667,7 +700,9 @@ function applyInfo(info) {
     server.senderQueueFillMs = Number(info.server.senderQueueFillMs || 0);
     server.senderDroppedFrames = Number(info.server.senderDroppedFrames || 0);
     server.fifoUnderruns = Number(info.server.serverFifoUnderruns || 0);
-    server.encoderOverloads = Number(info.server.webrtcEncoderOverloadWarnings || 0);
+    server.encoderOverloads = Number(info.server.webrtcEncodeOverBudgetCount
+      || info.server.webrtcEncoderOverloadWarnings
+      || 0);
     server.webrtcOpenTracks = Number(info.server.webrtcOpenTracks || 0);
     server.rtpAttempts = Number(info.server.webrtcRtpPacketsAttempted || 0);
     server.rtpSent = Number(info.server.webrtcRtpPacketsSent || info.server.webrtcSendCalls || 0);
@@ -681,6 +716,37 @@ function applyInfo(info) {
       rtcStats.iceConnectionState = info.server.webrtcIceConnectionState;
     }
   }
+}
+
+function applyStateUpdate(message) {
+  const revision = Number(message.stateRevision || 0);
+  if (revision > 0 && revision < lastStateRevision) {
+    return;
+  }
+
+  lastStateRevision = revision || lastStateRevision;
+  lastStateUpdateReceivedTimestamp = new Date().toISOString();
+
+  server.stateRevision = lastStateRevision;
+  server.stateOrigin = message.origin || server.stateOrigin;
+  server.opusBitrateBps = Number(message.activeBitrateBps || server.opusBitrateBps);
+  server.opusBitratePreset = message.activeBitrateLabel || bitrateLabel(server.opusBitrateBps);
+  server.latencyPreset = message.activeLatencyMode || server.latencyPreset;
+  server.opusFrameDurationMs = Number(message.activeFrameDurationMs || server.opusFrameDurationMs);
+  server.activePlayoutDelayHintMs = Number(message.activePlayoutDelayHintMs || server.activePlayoutDelayHintMs);
+  server.lastAdaptationReason = message.lastAdaptationReason || server.lastAdaptationReason;
+  server.lastAdaptationTimestamp = message.lastAdaptationTimestamp || server.lastAdaptationTimestamp;
+
+  const confirmed = makeProfile(
+    server.opusBitrateBps,
+    latencyValueFromPreset(server.latencyPreset),
+    message.origin || "remote_sync",
+    latencyTarget(latencyValueFromPreset(server.latencyPreset)),
+    server.opusFrameDurationMs
+  );
+  setActiveProfile(confirmed);
+  profileApplyInProgress = false;
+  renderUi();
 }
 
 async function refreshServerInfo() {
@@ -698,7 +764,7 @@ function startTimers() {
   }
 
   if (!rtcStatsTimer) {
-    rtcStatsTimer = window.setInterval(refreshRtcStats, 500);
+    rtcStatsTimer = window.setInterval(refreshRtcStats, 1000);
   }
 
   startServerTimer();
@@ -745,6 +811,10 @@ async function handleSignalMessage(message) {
     setStatus("error");
     els.warning.textContent = message.message || "WebRTC signaling failed";
   }
+
+  if (message.type === "stream_state_update") {
+    applyStateUpdate(message);
+  }
 }
 
 function handleSocketMessage(event) {
@@ -784,10 +854,18 @@ async function startWebRtc() {
   markProfileApplyPending();
 
   pc = new RTCPeerConnection({ iceServers: [] });
+  // Receive-only WebRTC playback: no microphone capture, so browser AEC/NS/AGC constraints are never enabled.
   pc.addTransceiver("audio", { direction: "recvonly" });
+  els.remoteAudio.autoplay = true;
+  els.remoteAudio.muted = false;
+  els.remoteAudio.volume = 1.0;
 
   pc.ontrack = (event) => {
+    if (event.track.kind !== "audio") return;
     remoteTrack = event.track;
+    remoteTrack.onmute = renderUi;
+    remoteTrack.onunmute = renderUi;
+    remoteTrack.onended = renderUi;
     if (event.streams && event.streams[0]) {
       els.remoteAudio.srcObject = event.streams[0];
       remoteStream = event.streams[0];
@@ -834,7 +912,8 @@ async function startWebRtc() {
       sdp: pc.localDescription.sdp,
       bitrateBps: activeProfile.bitrateBps,
       bitratePreset: activeProfile.bitratePreset,
-      latencyPreset: activeProfile.latencyPreset
+      latencyPreset: activeProfile.latencyPreset,
+      profileSource: activeProfile.source === "auto" ? "autonegotiation" : "browser_user"
     });
   };
 }
@@ -963,9 +1042,12 @@ function inboundSnapshot(stat) {
     bytesReceived: nonNegativeNumberOrNull(stat.bytesReceived),
     packetsReceived,
     packetsLost,
+    packetsDiscarded: nonNegativeNumberOrNull(stat.packetsDiscarded),
     packetsReceivedIncreasing,
     jitter: finiteNumberOrNull(stat.jitter),
     concealedSamples: stat.concealedSamples ?? stat.concealedAudio ?? null,
+    concealmentEvents: stat.concealmentEvents ?? null,
+    audioLevel: finiteNumberOrNull(stat.audioLevel),
     jitterBufferDelay: finiteNumberOrNull(stat.jitterBufferDelay),
     jitterBufferTargetDelay: finiteNumberOrNull(stat.jitterBufferTargetDelay)
   };
@@ -1025,9 +1107,13 @@ async function refreshRtcStats() {
     rtcStats.inboundStatsId = inbound.id;
     rtcStats.packetsReceivedIncreasing = inbound.packetsReceivedIncreasing;
     rtcStats.packetsReceived = inbound.packetsReceived;
+    rtcStats.bytesReceived = inbound.bytesReceived;
     rtcStats.packetsLost = inbound.packetsLost;
+    rtcStats.packetsDiscarded = inbound.packetsDiscarded;
     rtcStats.jitterMs = inbound.jitter === null ? 0 : inbound.jitter * 1000;
     rtcStats.concealedSamples = inbound.concealedSamples;
+    rtcStats.concealmentEvents = inbound.concealmentEvents;
+    rtcStats.audioLevel = inbound.audioLevel;
     rtcStats.jitterBufferDelayMs = inbound.jitterBufferDelay !== null
       ? inbound.jitterBufferDelay * 1000
       : null;
@@ -1041,6 +1127,20 @@ async function refreshRtcStats() {
       autoNegotiation.lastFailure = error.message || "auto negotiation error";
       els.warning.textContent = autoNegotiation.lastFailure;
       renderUi();
+    });
+
+    sendJson({
+      type: "browser_receiver_stats",
+      packetsReceived: rtcStats.packetsReceived,
+      bytesReceived: rtcStats.bytesReceived,
+      packetsLost: rtcStats.packetsLost,
+      packetsDiscarded: rtcStats.packetsDiscarded,
+      jitterMs: rtcStats.jitterMs,
+      concealedSamples: rtcStats.concealedSamples,
+      concealmentEvents: rtcStats.concealmentEvents,
+      audioLevel: rtcStats.audioLevel,
+      receiverTrackMuted: remoteTrack ? remoteTrack.muted : null,
+      receiverTrackReadyState: remoteTrack ? remoteTrack.readyState : "none"
     });
   } catch {
     // Stats availability varies by browser and connection state.
@@ -1063,7 +1163,11 @@ function renderUi() {
   els.concealedSamples.textContent = rtcStats.concealedSamples === null ? "-" : String(rtcStats.concealedSamples);
   els.jitterBufferDelay.textContent = rtcStats.jitterBufferDelayMs === null ? "-" : `${rtcStats.jitterBufferDelayMs.toFixed(1)} ms`;
   els.jitterBufferTargetDelay.textContent = rtcStats.jitterBufferTargetDelayMs === null ? "-" : `${rtcStats.jitterBufferTargetDelayMs.toFixed(1)} ms`;
-  els.remoteTrackState.textContent = remoteTrack ? `${remoteTrack.readyState} ${remoteTrack.muted ? "muted" : "live"}` : "none";
+  els.remoteTrackState.textContent = remoteTrack
+    ? `${remoteTrack.readyState} ${remoteTrack.muted ? "muted" : "unmuted"}`
+      + ` bytes ${formatPacketCount(rtcStats.bytesReceived)}`
+      + ` level ${rtcStats.audioLevel === null ? "-" : rtcStats.audioLevel.toFixed(3)}`
+    : "none";
   els.latencyPreset.textContent = `${activeProfile.latencyPreset} (${activeProfile.latencyTarget})`;
 
   els.senderQueueFill.textContent = `${server.senderQueueFillMs.toFixed(1)} ms`;
@@ -1091,12 +1195,15 @@ function renderUi() {
   els.autoProfileIndex.textContent = autoNegotiation.profilesTested > 0
     ? `${autoNegotiation.profilesTested}/${autoMaxProfiles}`
     : `0/${autoMaxProfiles}`;
-  els.activeEncoderBitrate.textContent = `${server.opusBitratePreset} (${formatBitrateKbps(server.opusBitrateBps)})`;
+  els.activeEncoderBitrate.textContent = `${formatBitrateKbps(server.opusBitrateBps)}`
+    + ` rev ${server.stateRevision} ${server.stateOrigin}`;
   els.activeOpusFrame.textContent = `${server.opusFrameDurationMs} ms`;
   els.autoProfileChanges.textContent = String(autoNegotiation.profileChanges);
   els.autoFifoUnderruns.textContent = String(server.fifoUnderruns);
   els.autoFinalProfile.textContent = autoNegotiation.finalProfile;
-  els.autoLastFailure.textContent = autoNegotiation.lastFailure === "-" ? autoNegotiation.readiness : autoNegotiation.lastFailure;
+  els.autoLastFailure.textContent = autoNegotiation.lastFailure === "-"
+    ? `${autoNegotiation.readiness}; native ${server.lastAdaptationReason}; rx ${lastStateUpdateReceivedTimestamp}; suppressed ${uiSyncSuppressedEventCount}`
+    : autoNegotiation.lastFailure;
 
   els.bitrateSelect.disabled = autoNegotiation.active || profileApplyInProgress;
   els.latencySelect.disabled = autoNegotiation.active || profileApplyInProgress;
@@ -1116,6 +1223,11 @@ async function reconnectForManualProfileChange() {
 }
 
 function handleManualProfileChange() {
+  if (suppressControlEvents > 0) {
+    uiSyncSuppressedEventCount += 1;
+    return;
+  }
+
   if (autoNegotiation.active) return;
 
   profileUserSelected = true;

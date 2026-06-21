@@ -400,7 +400,7 @@ void AboutPanel::paint(juce::Graphics& g)
     const juce::String copyright = "\xc2\xa9 2026 Aras Pigeon";
     const juce::String description = "Transparent VST3 for streaming audio from the DAW master bus, "
         "and other DAW buses if inserted there, to a browser over LAN.";
-    const juce::String text = juce::String("Version 0.5\n"
+    const juce::String text = juce::String("Version 0.7\n"
         "Author: Aras Pigeon\n\n"
     ) + description + "\n\n"
         + copyright + "\n"
@@ -629,10 +629,21 @@ void PGStreamAudioProcessorEditor::timerCallback()
                               + " (" + juce::String(stats.senderQueueFillMs, 1) + " ms)"
                               + "    Dropped tap frames: " + juce::String(stats.fifoDroppedFrames)
                               + "\nWebRTC encoded packets: " + juce::String(stats.webrtcEncodedPackets)
+                              + "    Track packets/bytes: " + juce::String(stats.webrtcPacketsSubmittedToTrack)
+                              + "/" + juce::String(stats.webrtcBytesSubmittedToTrack)
                               + "    RTP sent/fail: " + juce::String(stats.webrtcRtpPacketsSent)
                               + "/" + juce::String(stats.webrtcRtpSendFailures)
                               + "\nRTP attempts: " + juce::String(stats.webrtcRtpPacketsAttempted)
-                              + "    Encoder overload warnings: " + juce::String(stats.webrtcEncoderOverloadWarnings),
+                              + "    PT: " + juce::String(stats.webrtcActualPayloadType)
+                              + "    SSRC: " + juce::String(static_cast<int64_t> (stats.webrtcSsrc))
+                              + "    Seq/TS: " + juce::String(static_cast<int> (stats.webrtcSequenceCurrent))
+                              + "/" + juce::String(static_cast<int64_t> (stats.webrtcTimestampCurrent))
+                              + "\nState rev/origin: " + juce::String(stats.stateRevision)
+                              + "/" + stats.stateOrigin
+                              + "    Reason: " + stats.lastAdaptationReason
+                              + "\nRMS L/R: " + juce::String(stats.inputRmsL, 4)
+                              + "/" + juce::String(stats.inputRmsR, 4)
+                              + "    Encode over-budget count: " + juce::String(stats.webrtcEncodeOverBudgetCount),
                           juce::dontSendNotification);
 
     juce::StringArray candidateUrls;

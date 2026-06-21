@@ -9,6 +9,7 @@
 #include <atomic>
 #include <functional>
 #include <mutex>
+#include <unordered_set>
 #include <string>
 #include <vector>
 
@@ -47,13 +48,25 @@ private:
 
     void handleWebSocketText(mg_connection* connection, const char* data, size_t dataLen);
     void notifyActiveProfileChanged(OpusBitrateMode bitrateMode, LatencyMode latencyMode);
+    void noteStateChangeLocked(const char* origin, const char* reason);
+    void sendStateUpdate(mg_connection* connection, const StreamStats& stats);
+    void broadcastStateUpdate(const StreamStats& stats);
 
     AudioTapFifo& fifo;
     mutable std::mutex configMutex;
+    StreamConfig selectedConfig;
     StreamConfig config;
+    uint64_t stateRevision = 0;
+    juce::String stateOrigin { "startup" };
+    juce::String lastAdaptationReason { "startup" };
+    juce::String lastAdaptationTimestamp;
+    juce::String lastStateUpdateSentTimestamp;
 
     mutable std::mutex callbackMutex;
     std::function<void(OpusBitrateMode, LatencyMode)> activeProfileCallback;
+
+    mutable std::mutex websocketMutex;
+    std::unordered_set<mg_connection*> websocketConnections;
 
     mutable std::mutex statusMutex;
     juce::String statusText { "disabled" };

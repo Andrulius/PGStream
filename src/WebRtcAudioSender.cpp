@@ -17,6 +17,9 @@ constexpr int opusSampleRate = 48000;
 constexpr int opusChannels = 2;
 constexpr int defaultOpusPayloadType = 111;
 constexpr int maxRtpPayloadType = 127;
+constexpr int defaultOpusComplexity = 8;
+constexpr int fallbackOpusComplexity = 6;
+constexpr double encodeBudgetRatio = 0.75;
 
 juce::String jsonString(const juce::String& value)
 {
@@ -217,8 +220,11 @@ void WebRtcAudioSender::recreateEncoder()
     opus_encoder_ctl(newEncoder.get(), OPUS_SET_SIGNAL(OPUS_SIGNAL_MUSIC));
     opus_encoder_ctl(newEncoder.get(), OPUS_SET_DTX(0));
     opus_encoder_ctl(newEncoder.get(), OPUS_SET_INBAND_FEC(0));
-    opus_encoder_ctl(newEncoder.get(), OPUS_SET_COMPLEXITY(8));
-    opus_encoder_ctl(newEncoder.get(), OPUS_SET_VBR(0));
+    opus_encoder_ctl(newEncoder.get(), OPUS_SET_PACKET_LOSS_PERC(0));
+    opus_encoder_ctl(newEncoder.get(), OPUS_SET_COMPLEXITY(encoderComplexity));
+    opus_encoder_ctl(newEncoder.get(), OPUS_SET_VBR(1));
+    opus_encoder_ctl(newEncoder.get(), OPUS_SET_VBR_CONSTRAINT(1));
+    opus_encoder_ctl(newEncoder.get(), OPUS_SET_LSB_DEPTH(24));
 
     encoder = std::move(newEncoder);
     encoderBitrateBps = targetBitrate;
@@ -239,7 +245,41 @@ void WebRtcAudioSender::resetCountersLocked()
     rtpPacketsAttempted.store(0, std::memory_order_relaxed);
     rtpPacketsSent.store(0, std::memory_order_relaxed);
     rtpSendFailures.store(0, std::memory_order_relaxed);
-    encoderOverloadWarnings.store(0, std::memory_order_relaxed);
+    encodeOverBudgetCount.store(0, std::memory_order_relaxed);
+    timestampAnomalyCount.store(0, std::memory_order_relaxed);
+    opusEncodeErrors.store(0, std::memory_order_relaxed);
+    opusPacketBytesTotal.store(0, std::memory_order_relaxed);
+    opusPacketBytesLast.store(0, std::memory_order_relaxed);
+    haveLastSubmittedTimestamp = false;
+    lastSubmittedTimestamp = 0;
+    currentSequenceNumber = 0;
+    currentTimestamp = 0;
+    currentTimestampIncrementActual = 0;
+    currentTimestampIncrementExpected = static_cast<uint32_t> (encoderFrameFrames);
+    inputRmsL = 0.0;
+    inputRmsR = 0.0;
+}
+
+void WebRtcAudioSender::resetEncoderComplexityLocked()
+{
+    encoderComplexity = defaultOpusComplexity;
+    if (encoder != nullptr)
+        opus_encoder_ctl(encoder.get(), OPUS_SET_COMPLEXITY(encoderComplexity));
+}
+
+void WebRtcAudioSender::fallbackEncoderComplexityLocked()
+{
+    if (encoderComplexity <= fallbackOpusComplexity)
+        return;
+
+    if (encoder != nullptr)
+    {
+        const auto result = opus_encoder_ctl(encoder.get(), OPUS_SET_COMPLEXITY(fallbackOpusComplexity));
+        if (result != OPUS_OK)
+            return;
+    }
+
+    encoderComplexity = fallbackOpusComplexity;
 }
 
 void WebRtcAudioSender::handleOffer(mg_connection* connection, const juce::var& message)
@@ -326,6 +366,9 @@ void WebRtcAudioSender::handleOffer(mg_connection* connection, const juce::var& 
         const auto cname = std::string("pgstream-audio");
         auto audio = rtc::Description::Audio(toStdString(offerAudio.mid), rtc::Description::Direction::SendOnly);
         audio.addOpusCodec(offerAudio.opusPayloadType, opusFmtp(peerConfig));
+        const auto ptime = std::to_string(peerConfig.opusFrameDurationMs());
+        audio.addAttribute("ptime:" + ptime);
+        audio.addAttribute("maxptime:" + ptime);
         audio.addSSRC(ssrc, cname, "pgstream", "pgstream-audio");
 
         peer->track = peer->pc->addTrack(audio);
@@ -363,6 +406,12 @@ void WebRtcAudioSender::handleOffer(mg_connection* connection, const juce::var& 
                 resetCountersLocked();
 
             peers[connection] = peer;
+            negotiatedPayloadType = offerAudio.opusPayloadType;
+            currentSsrc = ssrc;
+            currentSequenceNumber = peer->rtpConfig->sequenceNumber;
+            currentTimestamp = peer->rtpConfig->timestamp;
+            currentTimestampIncrementExpected = static_cast<uint32_t> (encoderFrameFrames);
+            haveLastSubmittedTimestamp = false;
         }
 
         closePeer(oldPeer);
@@ -417,6 +466,7 @@ void WebRtcAudioSender::removeConnection(mg_connection* connection)
             pendingFrames = 0;
             encodedSampleCursor = 0;
             resetCountersLocked();
+            resetEncoderComplexityLocked();
         }
     }
 
@@ -434,6 +484,7 @@ void WebRtcAudioSender::clear()
         pendingFrames = 0;
         encodedSampleCursor = 0;
         resetCountersLocked();
+        resetEncoderComplexityLocked();
     }
 
     for (auto& peer : toClose)
@@ -502,6 +553,18 @@ void WebRtcAudioSender::encodeAndSend(const float* interleavedStereo48k, size_t 
             continue;
 
         const auto encodeStarted = juce::Time::getMillisecondCounterHiRes();
+        double sumSquaresL = 0.0;
+        double sumSquaresR = 0.0;
+        for (size_t i = 0; i < encoderFrameFrames; ++i)
+        {
+            const auto left = static_cast<double> (pendingPcm[i * opusChannels]);
+            const auto right = static_cast<double> (pendingPcm[i * opusChannels + 1]);
+            sumSquaresL += left * left;
+            sumSquaresR += right * right;
+        }
+        inputRmsL = std::sqrt(sumSquaresL / static_cast<double> (encoderFrameFrames));
+        inputRmsR = std::sqrt(sumSquaresR / static_cast<double> (encoderFrameFrames));
+
         const auto encoded = opus_encode_float(encoder.get(),
                                                pendingPcm.data(),
                                                static_cast<int> (encoderFrameFrames),
@@ -509,11 +572,16 @@ void WebRtcAudioSender::encodeAndSend(const float* interleavedStereo48k, size_t 
                                                static_cast<opus_int32> (opusPacket.size()));
         const auto encodeMs = juce::Time::getMillisecondCounterHiRes() - encodeStarted;
 
-        if (encodeMs > static_cast<double> (encoderFrameMs) * 0.75)
-            encoderOverloadWarnings.fetch_add(1, std::memory_order_relaxed);
+        if (encodeMs > static_cast<double> (encoderFrameMs) * encodeBudgetRatio)
+        {
+            encodeOverBudgetCount.fetch_add(1, std::memory_order_relaxed);
+            fallbackEncoderComplexityLocked();
+        }
 
         if (encoded > 0)
         {
+            opusPacketBytesLast.store(encoded, std::memory_order_relaxed);
+            opusPacketBytesTotal.fetch_add(static_cast<uint64_t> (encoded), std::memory_order_relaxed);
             const auto sent = sendEncodedFrameLocked(opusPacket.data(),
                                                      static_cast<size_t> (encoded),
                                                      encodedSampleCursor);
@@ -524,6 +592,10 @@ void WebRtcAudioSender::encodeAndSend(const float* interleavedStereo48k, size_t 
                 encodedBytes.fetch_add(static_cast<uint64_t> (encoded), std::memory_order_relaxed);
                 encodedSampleCursor += encoderFrameFrames;
             }
+        }
+        else
+        {
+            opusEncodeErrors.fetch_add(1, std::memory_order_relaxed);
         }
 
         pendingFrames = 0;
@@ -551,6 +623,12 @@ WebRtcAudioSender::SendResult WebRtcAudioSender::sendEncodedFrameLocked(const ui
             peer->track->sendFrame(byteData, bytes, rtc::FrameInfo(seconds));
             sendCalls.fetch_add(1, std::memory_order_relaxed);
             ++result.sent;
+            if (peer->rtpConfig != nullptr)
+            {
+                currentSequenceNumber = static_cast<uint16_t> (peer->rtpConfig->sequenceNumber - 1u);
+                currentTimestamp = peer->rtpConfig->timestamp;
+                currentTimestampIncrementExpected = static_cast<uint32_t> (encoderFrameFrames);
+            }
         }
         catch (...)
         {
@@ -566,6 +644,19 @@ WebRtcAudioSender::SendResult WebRtcAudioSender::sendEncodedFrameLocked(const ui
     if (result.failed > 0)
         rtpSendFailures.fetch_add(result.failed, std::memory_order_relaxed);
 
+    if (result.sent > 0)
+    {
+        if (haveLastSubmittedTimestamp)
+        {
+            currentTimestampIncrementActual = currentTimestamp - lastSubmittedTimestamp;
+            if (currentTimestampIncrementActual != currentTimestampIncrementExpected)
+                timestampAnomalyCount.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        lastSubmittedTimestamp = currentTimestamp;
+        haveLastSubmittedTimestamp = true;
+    }
+
     return result;
 }
 
@@ -574,6 +665,8 @@ void WebRtcAudioSender::resetAudio()
     std::lock_guard<std::mutex> lock(mutex);
     pendingFrames = 0;
     encodedSampleCursor = 0;
+    haveLastSubmittedTimestamp = false;
+    currentTimestampIncrementActual = 0;
 }
 
 int WebRtcAudioSender::peerCount() const
@@ -611,7 +704,18 @@ void WebRtcAudioSender::fillStats(StreamStats& stats) const
     stats.webrtcRtpPacketsAttempted = rtpPacketsAttempted.load(std::memory_order_relaxed);
     stats.webrtcRtpPacketsSent = rtpPacketsSent.load(std::memory_order_relaxed);
     stats.webrtcRtpSendFailures = rtpSendFailures.load(std::memory_order_relaxed);
-    stats.webrtcEncoderOverloadWarnings = encoderOverloadWarnings.load(std::memory_order_relaxed);
+    stats.webrtcEncodeOverBudgetCount = encodeOverBudgetCount.load(std::memory_order_relaxed);
+    stats.webrtcEncoderOverloadWarnings = stats.webrtcEncodeOverBudgetCount;
+    stats.webrtcTimestampAnomalyCount = timestampAnomalyCount.load(std::memory_order_relaxed);
+    stats.webrtcPacketsSubmittedToTrack = stats.webrtcRtpPacketsSent;
+    stats.webrtcBytesSubmittedToTrack = encodedBytes.load(std::memory_order_relaxed);
+    stats.webrtcSubmitErrors = stats.webrtcRtpSendFailures;
+    stats.opusEncodeErrors = opusEncodeErrors.load(std::memory_order_relaxed);
+    stats.opusPacketBytesLast = opusPacketBytesLast.load(std::memory_order_relaxed);
+    const auto packetCount = encodedPackets.load(std::memory_order_relaxed);
+    stats.opusPacketBytesAvg = packetCount > 0
+        ? static_cast<double> (opusPacketBytesTotal.load(std::memory_order_relaxed)) / static_cast<double> (packetCount)
+        : 0.0;
 
     PeerPtr newestPeer;
     {
@@ -628,6 +732,15 @@ void WebRtcAudioSender::fillStats(StreamStats& stats) const
         {
             return entry.second != nullptr && entry.second->open.load(std::memory_order_acquire);
         }));
+        stats.webrtcNegotiatedPayloadType = negotiatedPayloadType;
+        stats.webrtcActualPayloadType = negotiatedPayloadType;
+        stats.webrtcSsrc = currentSsrc;
+        stats.webrtcSequenceCurrent = currentSequenceNumber;
+        stats.webrtcTimestampCurrent = currentTimestamp;
+        stats.webrtcTimestampIncrementExpected = currentTimestampIncrementExpected;
+        stats.webrtcTimestampIncrementActual = currentTimestampIncrementActual;
+        stats.inputRmsL = inputRmsL;
+        stats.inputRmsR = inputRmsR;
 
         if (! peers.empty())
             newestPeer = peers.begin()->second;

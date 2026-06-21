@@ -2,6 +2,8 @@
 
 PGStream is a Windows x64 VST3 audio effect for transparent stereo master-bus tapping. The DAW audio path is passed through 1:1; the plugin only copies the first stereo pair into a preallocated FIFO and streams that copy to a LAN browser.
 
+The browser stream uses lossy Opus. It is designed for perceptually transparent monitoring and broadcast-quality LAN listening with no added effects, browser enhancement, or unintended gain changes; it is not a bit-perfect archival transport.
+
 The embedded server is disabled by default for DAW scan safety. Enabling the stream starts a plain HTTP/WS CivetWeb server inside the plugin. The browser page is embedded HTML/CSS/JS. Audio transport is WebRTC Opus over libdatachannel with Mbed TLS for DTLS/SRTP; WebSocket is used only for WebRTC signaling.
 
 ## Build
@@ -56,13 +58,15 @@ The browser **Connect / Play** control toggles to **Stop** after playback setup 
 
 PGStream encodes stereo 48 kHz Opus frames on the network worker thread and sends them as RTP media through libdatachannel. SDP offers from the browser are answered by the plugin over WS signaling, and the sender uses the offered audio MID and Opus RTP payload type so the remote audio track is paired correctly.
 
+Opus is configured for continuous stereo music/audio at the selected bitrate with DTX and in-band FEC disabled for LAN mode. Encoder complexity starts at 8 and can fall back internally to 6 only after the encode over-budget counter increases.
+
 The worker reads from the audio FIFO in roughly one Opus-frame chunk at a time. If the DAW session is not 48 kHz, resampling to 48 kHz happens only on the non-realtime network worker. The local DAW pass-through path is never resampled.
 
 The browser and DAW do not share a hardware audio clock. PGStream relies on WebRTC's browser jitter buffer for Opus/RTP playout. When the DAW is idle and keep-alive is enabled, PGStream sends Opus silence frames so the WebRTC media path stays warm.
 
 The project image `assets/pgs.png` is embedded in the plugin binary and shown in both the plugin editor and browser UI. The plugin editor renders a QR code for the selected primary LAN URL after the stream is enabled.
 
-The plugin editor About panel opens from the small `i` button and closes with its `X` button. It displays the embedded `assets/logo.png` image, plugin name, version 0.5, author, description, copyright, project link, and AGPL license note.
+The plugin editor About panel opens from the small `i` button and closes with its `X` button. It displays the embedded `assets/logo.png` image, plugin name, version 0.7, author, description, copyright, project link, and AGPL license note.
 
 ## Browser Auto Negotiation
 
@@ -82,7 +86,7 @@ Modes choose the next existing profile as follows:
 - **Latency Priority**: lower bitrate first, increase Latency Mode only when bitrate is already at the lowest setting.
 - **Balanced**: alternate one latency step safer, then one bitrate step lower.
 
-If stats remain unavailable, Auto Negotiation stops with a diagnostic instead of degrading blindly. If every valid profile fails, PGStream selects the safest available settings: 128 kb/s with Safe latency. Plugin FIFO underruns are displayed as diagnostics only; they never trigger Auto Negotiation profile changes and do not affect the final selected profile.
+If stats remain unavailable, Auto Negotiation stops with a diagnostic instead of degrading blindly. If every valid profile fails, PGStream uses the safest available runtime settings: 128 kb/s with Safe latency. Auto Negotiation updates the active native state, and the plugin and browser bitrate/latency comboboxes visibly follow the confirmed active value. Plugin FIFO underruns are displayed as diagnostics only; they never trigger Auto Negotiation profile changes and do not affect the final selected profile.
 
 ## Nerd Diagnostics
 
@@ -94,6 +98,8 @@ Plugin-side diagnostics show server and WebRTC sender metrics:
 - **WebRTC peers/open tracks**: current libdatachannel peers and open media tracks.
 - **WebRTC encoded packets**: Opus encoder output successfully emitted to at least one open track.
 - **RTP attempts/sent/failures**: send attempts to WebRTC tracks, successful sends, and exceptions from the media track.
+- **Encode over-budget count**: Opus frames whose encode time exceeded the worker budget; this is the only trigger for the internal complexity-6 fallback.
+- **State and media path**: active state revision/origin, last adaptation reason, negotiated payload type, SSRC, RTP sequence/timestamp, submitted track packets/bytes, Opus packet sizes, and input RMS.
 - **Current selected LAN IP**, bind/listen address, port, input sample rate, total submitted 48 kHz frames, FIFO fill, FIFO drops, and candidate LAN URLs.
 
 Browser-side diagnostics show:
@@ -103,7 +109,7 @@ Browser-side diagnostics show:
 - **Remote track**: browser audio track state.
 - **Signaling socket**: the WS connection used only for WebRTC signaling.
 - **RTP attempts/sent/failures**: plugin-side sender counters mirrored from `/info`.
-- **Auto Negotiation**: active state, selected mode, tested profile, phase, baseline/current browser `packetsLost`, packet loss delta, stable zero-loss time, active encoder bitrate, active Opus frame duration, profile changes, final selected profile, last rejected profile, and FIFO underruns as a separate diagnostic.
+- **Auto Negotiation**: active state, selected mode, tested profile, phase, baseline/current browser `packetsLost`, packet loss delta, stable zero-loss time, active encoder bitrate, active Opus frame duration, state revision/origin, profile changes, final runtime profile, last rejected profile, and FIFO underruns as a separate diagnostic.
 
 ## LAN IP Selection
 

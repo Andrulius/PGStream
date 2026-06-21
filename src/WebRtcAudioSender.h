@@ -56,6 +56,8 @@ private:
     void configureEncoderIfNeeded();
     void recreateEncoder();
     void resetCountersLocked();
+    void resetEncoderComplexityLocked();
+    void fallbackEncoderComplexityLocked();
     SendResult sendEncodedFrameLocked(const uint8_t* data, size_t bytes, uint64_t frameStartSample);
     void sendJson(mg_connection* connection, const juce::String& json) const;
     void closePeer(PeerPtr peer);
@@ -71,11 +73,22 @@ private:
     std::unique_ptr<OpusEncoder, void (*)(OpusEncoder*)> encoder;
     int encoderBitrateBps = 0;
     int encoderFrameMs = 0;
+    int encoderComplexity = 8;
     size_t encoderFrameFrames = 960;
     std::vector<float> pendingPcm;
     size_t pendingFrames = 0;
     std::vector<uint8_t> opusPacket;
     uint64_t encodedSampleCursor = 0;
+    bool haveLastSubmittedTimestamp = false;
+    uint32_t lastSubmittedTimestamp = 0;
+    uint16_t currentSequenceNumber = 0;
+    uint32_t currentTimestamp = 0;
+    uint32_t currentTimestampIncrementActual = 0;
+    uint32_t currentTimestampIncrementExpected = 960;
+    uint32_t currentSsrc = 0;
+    int negotiatedPayloadType = 111;
+    double inputRmsL = 0.0;
+    double inputRmsR = 0.0;
 
     std::atomic<uint64_t> encodedFrames { 0 };
     std::atomic<uint64_t> encodedPackets { 0 };
@@ -84,6 +97,10 @@ private:
     std::atomic<uint64_t> rtpPacketsAttempted { 0 };
     std::atomic<uint64_t> rtpPacketsSent { 0 };
     std::atomic<uint64_t> rtpSendFailures { 0 };
-    std::atomic<uint64_t> encoderOverloadWarnings { 0 };
+    std::atomic<uint64_t> encodeOverBudgetCount { 0 };
+    std::atomic<uint64_t> timestampAnomalyCount { 0 };
+    std::atomic<uint64_t> opusEncodeErrors { 0 };
+    std::atomic<uint64_t> opusPacketBytesTotal { 0 };
+    std::atomic<int> opusPacketBytesLast { 0 };
 };
 }

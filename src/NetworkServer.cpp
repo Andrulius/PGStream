@@ -58,6 +58,28 @@ int jsonPropertyInt(const juce::var& object, const char* name, int fallback)
     return fallback;
 }
 
+bool hasJsonProperty(const juce::var& object, const char* name)
+{
+    if (auto* dynamic = object.getDynamicObject())
+        return dynamic->hasProperty(name);
+
+    return false;
+}
+
+bool isValidBitrateBps(int bps)
+{
+    return bps == 128000 || bps == 192000 || bps == 256000 || bps == 320000 || bps == 510000;
+}
+
+bool isValidLatencyText(const juce::String& text)
+{
+    const auto value = text.toLowerCase();
+    return value.contains("safe")
+        || value.contains("ultra")
+        || value.contains("low")
+        || value.contains("balanced");
+}
+
 OpusBitrateMode parseBrowserBitrateMode(const juce::var& message, OpusBitrateMode fallback)
 {
     const auto preset = jsonPropertyString(message, "bitratePreset").toLowerCase();
@@ -92,6 +114,11 @@ LatencyMode parseBrowserLatencyMode(const juce::var& message, LatencyMode fallba
 
     return fallback;
 }
+
+juce::String nowTimestamp()
+{
+    return juce::Time::getCurrentTime().toISO8601(true);
+}
 }
 
 NetworkServer::NetworkServer(AudioTapFifo& fifoToRead)
@@ -125,13 +152,24 @@ void NetworkServer::applyConfig(const StreamConfig& newConfig)
     webrtcSender.applyConfig(adjustedConfig);
 
     bool needsRestart = false;
+    auto changed = false;
     {
         std::lock_guard<std::mutex> lock(configMutex);
         needsRestart = contextRunning.load(std::memory_order_acquire)
             && adjustedConfig.streamEnabled
-            && adjustedConfig.port != config.port;
+            && adjustedConfig.port != selectedConfig.port;
+        changed = stateRevision == 0
+            || adjustedConfig.opusBitrateMode != config.opusBitrateMode
+            || adjustedConfig.latencyMode != config.latencyMode;
+        selectedConfig = adjustedConfig;
         config = adjustedConfig;
+        if (changed)
+            noteStateChangeLocked(stateRevision == 0 ? "startup" : "plugin_user",
+                                  stateRevision == 0 ? "initial active state" : "plugin parameter change");
     }
+
+    if (changed)
+        broadcastStateUpdate(getStats());
 
     if (!adjustedConfig.streamEnabled)
     {
@@ -226,6 +264,11 @@ void NetworkServer::stopServer()
 
     webrtcSender.clear();
     contextRunning.store(false, std::memory_order_release);
+
+    {
+        std::lock_guard<std::mutex> lock(websocketMutex);
+        websocketConnections.clear();
+    }
 
     std::lock_guard<std::mutex> lock(statusMutex);
     lanUrl.clear();
@@ -371,6 +414,11 @@ void NetworkServer::handleWebSocketText(mg_connection* connection, const char* d
     if (type == "webrtc-offer")
     {
         auto changed = false;
+        const auto profileSource = jsonPropertyString(message, "profileSource").toLowerCase();
+        const auto autoOrigin = profileSource == "auto" || profileSource == "autonegotiation";
+        const auto origin = autoOrigin
+            ? "autonegotiation"
+            : "browser_user";
         OpusBitrateMode activeBitrateMode;
         LatencyMode activeLatencyMode;
         {
@@ -384,6 +432,11 @@ void NetworkServer::handleWebSocketText(mg_connection* connection, const char* d
             {
                 config.opusBitrateMode = activeBitrateMode;
                 config.latencyMode = activeLatencyMode;
+                selectedConfig.opusBitrateMode = activeBitrateMode;
+                selectedConfig.latencyMode = activeLatencyMode;
+                noteStateChangeLocked(origin, autoOrigin
+                    ? "auto negotiation selected active profile"
+                    : "browser selected active profile");
             }
         }
 
@@ -391,6 +444,74 @@ void NetworkServer::handleWebSocketText(mg_connection* connection, const char* d
             notifyActiveProfileChanged(activeBitrateMode, activeLatencyMode);
 
         webrtcSender.handleOffer(connection, message);
+        sendStateUpdate(connection, getStats());
+        return;
+    }
+
+    if (type == "stream_control_request")
+    {
+        const auto requestId = jsonPropertyString(message, "requestId");
+        const auto requestedBitrate = jsonPropertyInt(message, "bitrateBps", 0);
+        const auto requestedLatency = jsonPropertyString(message, hasJsonProperty(message, "latencyMode") ? "latencyMode" : "latencyPreset");
+        const auto reject = [this, connection, requestId] (const char* reason)
+        {
+            const auto stats = getStats();
+            const auto json = juce::String("{\"type\":\"stream_control_rejected\",\"requestId\":")
+                + jsonString(requestId)
+                + ",\"reason\":"
+                + jsonString(reason)
+                + ",\"currentStateRevision\":"
+                + juce::String(stats.stateRevision)
+                + "}";
+            mg_websocket_write(connection, MG_WEBSOCKET_OPCODE_TEXT, json.toRawUTF8(), json.getNumBytesAsUTF8());
+            sendStateUpdate(connection, stats);
+        };
+
+        if (hasJsonProperty(message, "bitrateBps") && ! isValidBitrateBps(requestedBitrate))
+        {
+            reject("invalid bitrate");
+            return;
+        }
+
+        if ((hasJsonProperty(message, "latencyMode") || hasJsonProperty(message, "latencyPreset"))
+            && ! isValidLatencyText(requestedLatency))
+        {
+            reject("invalid latency");
+            return;
+        }
+
+        auto changed = false;
+        StreamConfig updatedConfig;
+        OpusBitrateMode activeBitrateMode;
+        LatencyMode activeLatencyMode;
+        {
+            std::lock_guard<std::mutex> lock(configMutex);
+            activeBitrateMode = parseBrowserBitrateMode(message, config.opusBitrateMode);
+            activeLatencyMode = parseBrowserLatencyMode(message, config.latencyMode);
+            changed = activeBitrateMode != config.opusBitrateMode
+                || activeLatencyMode != config.latencyMode;
+            if (changed)
+            {
+                config.opusBitrateMode = activeBitrateMode;
+                config.latencyMode = activeLatencyMode;
+                selectedConfig.opusBitrateMode = activeBitrateMode;
+                selectedConfig.latencyMode = activeLatencyMode;
+                noteStateChangeLocked("browser_user", "browser control request");
+            }
+            updatedConfig = config;
+        }
+
+        if (changed)
+        {
+            notifyActiveProfileChanged(activeBitrateMode, activeLatencyMode);
+            webrtcSender.applyConfig(updatedConfig);
+            broadcastStateUpdate(getStats());
+        }
+        else
+        {
+            juce::ignoreUnused(requestId);
+            sendStateUpdate(connection, getStats());
+        }
         return;
     }
 
@@ -414,6 +535,70 @@ void NetworkServer::notifyActiveProfileChanged(OpusBitrateMode bitrateMode, Late
 
     if (callback)
         callback(bitrateMode, latencyMode);
+}
+
+void NetworkServer::noteStateChangeLocked(const char* origin, const char* reason)
+{
+    ++stateRevision;
+    stateOrigin = origin;
+    lastAdaptationReason = reason;
+    lastAdaptationTimestamp = nowTimestamp();
+}
+
+void NetworkServer::sendStateUpdate(mg_connection* connection, const StreamStats& stats)
+{
+    if (connection == nullptr)
+        return;
+
+    {
+        std::lock_guard<std::mutex> lock(configMutex);
+        lastStateUpdateSentTimestamp = nowTimestamp();
+    }
+
+    juce::String json;
+    json.preallocateBytes(1024);
+    json += "{\"type\":\"stream_state_update\",\"stateRevision\":";
+    json += juce::String(stats.stateRevision);
+    json += ",\"origin\":";
+    json += jsonString(stats.stateOrigin);
+    json += ",\"activeBitrateBps\":";
+    json += juce::String(stats.opusBitrateBps);
+    json += ",\"activeBitrateLabel\":";
+    json += jsonString(stats.opusBitratePreset);
+    json += ",\"activeLatencyMode\":";
+    json += jsonString(stats.latencyMode);
+    json += ",\"activeFrameDurationMs\":";
+    json += juce::String(stats.opusFrameDurationMs);
+    json += ",\"activePlayoutDelayHintMs\":";
+    json += juce::String(stats.activePlayoutDelayHintMs);
+    json += ",\"autonegotiationMode\":";
+    json += jsonString(stats.autonegotiationMode);
+    json += ",\"autonegotiationEnabled\":";
+    json += stats.autonegotiationEnabled ? "true" : "false";
+    json += ",\"autonegotiationState\":";
+    json += jsonString(stats.autonegotiationState);
+    json += ",\"lastAdaptationReason\":";
+    json += jsonString(stats.lastAdaptationReason);
+    json += ",\"lastAdaptationTimestamp\":";
+    json += jsonString(stats.lastAdaptationTimestamp);
+    json += "}";
+
+    mg_websocket_write(connection,
+                       MG_WEBSOCKET_OPCODE_TEXT,
+                       json.toRawUTF8(),
+                       json.getNumBytesAsUTF8());
+}
+
+void NetworkServer::broadcastStateUpdate(const StreamStats& stats)
+{
+    std::vector<mg_connection*> connections;
+    {
+        std::lock_guard<std::mutex> lock(websocketMutex);
+        connections.assign(websocketConnections.begin(), websocketConnections.end());
+    }
+
+    for (auto* connection : connections)
+        sendStateUpdate(connection, stats);
 }
 
 void NetworkServer::refreshLanSelection(int port)
@@ -446,21 +631,37 @@ int NetworkServer::handleHttpRequest(mg_connection* connection)
         const auto stats = getStats();
 
         juce::String json;
-        json.preallocateBytes(1536);
+        json.preallocateBytes(4096);
         json += "{\"name\":\"PGStream\",\"transport\":";
         json += jsonString(stats.transportMode);
         json += ",\"opusCodec\":\"opus/48000/2\",\"opusBitrateBps\":";
         json += juce::String(stats.opusBitrateBps);
         json += ",\"opusBitratePreset\":";
         json += jsonString(stats.opusBitratePreset);
+        json += ",\"selectedOpusBitrateBps\":";
+        json += juce::String(stats.selectedOpusBitrateBps);
+        json += ",\"selectedOpusBitratePreset\":";
+        json += jsonString(stats.selectedOpusBitratePreset);
         json += ",\"opusBitrateLimited\":";
         json += stats.opusBitrateLimited ? "true" : "false";
         json += ",\"latencyPreset\":";
         json += jsonString(stats.latencyMode);
+        json += ",\"selectedLatencyPreset\":";
+        json += jsonString(stats.selectedLatencyMode);
         json += ",\"latencyTarget\":";
         json += jsonString(stats.latencyTarget);
         json += ",\"opusFrameDurationMs\":";
         json += juce::String(stats.opusFrameDurationMs);
+        json += ",\"activePlayoutDelayHintMs\":";
+        json += juce::String(stats.activePlayoutDelayHintMs);
+        json += ",\"stateRevision\":";
+        json += juce::String(stats.stateRevision);
+        json += ",\"stateOrigin\":";
+        json += jsonString(stats.stateOrigin);
+        json += ",\"lastAdaptationReason\":";
+        json += jsonString(stats.lastAdaptationReason);
+        json += ",\"lastAdaptationTimestamp\":";
+        json += jsonString(stats.lastAdaptationTimestamp);
         json += ",\"inputSampleRate\":";
         json += juce::String(stats.inputSampleRate);
         json += ",\"server\":{\"serverFifoUnderruns\":";
@@ -505,8 +706,48 @@ int NetworkServer::handleHttpRequest(mg_connection* connection)
         json += juce::String(stats.webrtcRtpPacketsSent);
         json += ",\"webrtcRtpSendFailures\":";
         json += juce::String(stats.webrtcRtpSendFailures);
+        json += ",\"webrtcEncodeOverBudgetCount\":";
+        json += juce::String(stats.webrtcEncodeOverBudgetCount);
         json += ",\"webrtcEncoderOverloadWarnings\":";
         json += juce::String(stats.webrtcEncoderOverloadWarnings);
+        json += ",\"webrtcNegotiatedPayloadType\":";
+        json += juce::String(stats.webrtcNegotiatedPayloadType);
+        json += ",\"webrtcActualPayloadType\":";
+        json += juce::String(stats.webrtcActualPayloadType);
+        json += ",\"webrtcSsrc\":";
+        json += juce::String(static_cast<int64_t> (stats.webrtcSsrc));
+        json += ",\"webrtcSequenceCurrent\":";
+        json += juce::String(static_cast<int> (stats.webrtcSequenceCurrent));
+        json += ",\"webrtcTimestampCurrent\":";
+        json += juce::String(static_cast<int64_t> (stats.webrtcTimestampCurrent));
+        json += ",\"webrtcTimestampIncrementExpected\":";
+        json += juce::String(static_cast<int64_t> (stats.webrtcTimestampIncrementExpected));
+        json += ",\"webrtcTimestampIncrementActual\":";
+        json += juce::String(static_cast<int64_t> (stats.webrtcTimestampIncrementActual));
+        json += ",\"webrtcTimestampAnomalyCount\":";
+        json += juce::String(stats.webrtcTimestampAnomalyCount);
+        json += ",\"webrtcPacketsSubmittedToTrack\":";
+        json += juce::String(stats.webrtcPacketsSubmittedToTrack);
+        json += ",\"webrtcBytesSubmittedToTrack\":";
+        json += juce::String(stats.webrtcBytesSubmittedToTrack);
+        json += ",\"webrtcSubmitErrors\":";
+        json += juce::String(stats.webrtcSubmitErrors);
+        json += ",\"opusEncodeErrors\":";
+        json += juce::String(stats.opusEncodeErrors);
+        json += ",\"opusPacketBytesLast\":";
+        json += juce::String(stats.opusPacketBytesLast);
+        json += ",\"opusPacketBytesAvg\":";
+        json += juce::String(stats.opusPacketBytesAvg, 1);
+        json += ",\"inputRmsL\":";
+        json += juce::String(stats.inputRmsL, 6);
+        json += ",\"inputRmsR\":";
+        json += juce::String(stats.inputRmsR, 6);
+        json += ",\"stateRevision\":";
+        json += juce::String(stats.stateRevision);
+        json += ",\"stateOrigin\":";
+        json += jsonString(stats.stateOrigin);
+        json += ",\"lastStateUpdateSentTimestamp\":";
+        json += jsonString(stats.lastStateUpdateSentTimestamp);
         json += ",\"status\":";
         json += jsonString(stats.statusText);
         json += ",\"lanUrl\":";
@@ -544,7 +785,13 @@ int NetworkServer::wsConnectHandler(const mg_connection*, void*)
 
 void NetworkServer::wsReadyHandler(mg_connection* connection, void* cbdata)
 {
-    juce::ignoreUnused(connection, cbdata);
+    auto* server = static_cast<NetworkServer*> (cbdata);
+    {
+        std::lock_guard<std::mutex> lock(server->websocketMutex);
+        server->websocketConnections.insert(connection);
+    }
+
+    server->sendStateUpdate(connection, server->getStats());
 }
 
 int NetworkServer::wsDataHandler(mg_connection* connection, int bits, char* data, size_t dataLen, void* cbdata)
@@ -560,6 +807,10 @@ void NetworkServer::wsCloseHandler(const mg_connection* connection, void* cbdata
 {
     auto* server = static_cast<NetworkServer*> (cbdata);
     auto* mutableConnection = const_cast<mg_connection*> (connection);
+    {
+        std::lock_guard<std::mutex> lock(server->websocketMutex);
+        server->websocketConnections.erase(mutableConnection);
+    }
     server->webrtcSender.removeConnection(mutableConnection);
 }
 
@@ -577,9 +828,21 @@ void NetworkServer::updateStatus(juce::String text)
 StreamStats NetworkServer::getStats() const
 {
     StreamConfig localConfig;
+    StreamConfig localSelectedConfig;
+    uint64_t localStateRevision = 0;
+    juce::String localStateOrigin;
+    juce::String localLastAdaptationReason;
+    juce::String localLastAdaptationTimestamp;
+    juce::String localLastStateUpdateSentTimestamp;
     {
         std::lock_guard<std::mutex> lock(configMutex);
+        localSelectedConfig = selectedConfig;
         localConfig = config;
+        localStateRevision = stateRevision;
+        localStateOrigin = stateOrigin;
+        localLastAdaptationReason = lastAdaptationReason;
+        localLastAdaptationTimestamp = lastAdaptationTimestamp;
+        localLastStateUpdateSentTimestamp = lastStateUpdateSentTimestamp;
     }
 
     StreamStats stats;
@@ -589,12 +852,23 @@ StreamStats NetworkServer::getStats() const
     stats.connectedClients = webrtcSender.peerCount();
     stats.transportMode = localConfig.transportModeName();
     stats.inputSampleRate = juce::jmax(1, static_cast<int> (std::round(localConfig.sessionSampleRate)));
+    stats.selectedOpusBitrateBps = localSelectedConfig.opusBitrateBps();
+    stats.selectedOpusBitratePreset = localSelectedConfig.opusBitrateName();
     stats.opusBitrateBps = localConfig.opusBitrateBps();
     stats.opusBitratePreset = localConfig.opusBitrateName();
     stats.opusBitrateLimited = false;
+    stats.selectedLatencyMode = localSelectedConfig.latencyModeName();
     stats.latencyMode = localConfig.latencyModeName();
     stats.latencyTarget = localConfig.latencyTargetDescription();
     stats.opusFrameDurationMs = localConfig.opusFrameDurationMs();
+    stats.activePlayoutDelayHintMs = localConfig.playoutDelayHintMs();
+    stats.stateRevision = localStateRevision;
+    stats.stateOrigin = localStateOrigin;
+    stats.lastAdaptationReason = localLastAdaptationReason;
+    stats.lastAdaptationTimestamp = localLastAdaptationTimestamp;
+    stats.lastUserRequestedBitratePreset = localSelectedConfig.opusBitrateName();
+    stats.lastUserRequestedLatencyMode = localSelectedConfig.latencyModeName();
+    stats.lastStateUpdateSentTimestamp = localLastStateUpdateSentTimestamp;
     stats.framesSent = framesSent.load(std::memory_order_relaxed);
     stats.serverFifoUnderruns = serverFifoUnderruns.load(std::memory_order_relaxed);
     stats.fifoDroppedFrames = fifo.getDroppedFrames();

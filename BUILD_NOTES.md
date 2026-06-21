@@ -1,6 +1,6 @@
 # Build Notes
 
-PGStream is a native Windows x64 VST3 built with JUCE, CMake, CivetWeb, Mbed TLS, Opus, and libdatachannel. The DAW audio path remains transparent while browser streaming runs on a separate non-realtime network worker.
+PGStream is a native Windows x64 VST3 built with JUCE, CMake, CivetWeb, Mbed TLS, Opus, and libdatachannel. The DAW audio path remains transparent while browser streaming runs on a separate non-realtime network worker. The browser stream is lossy Opus for perceptually transparent monitoring/broadcast quality, not bit-perfect transmission.
 
 ## Source Dependencies
 
@@ -21,7 +21,7 @@ Pinned dependency versions:
 
 ## LAN Transport And Crypto Backend
 
-PGStream serves the browser UI over plain LAN HTTP and uses WS only for WebRTC SDP/ICE signaling. Audio media is WebRTC Opus RTP through libdatachannel.
+PGStream serves the browser UI over plain LAN HTTP and uses WS only for WebRTC SDP/ICE signaling. Audio media is WebRTC Opus RTP through libdatachannel; the build does not use the full Google libwebrtc reference library.
 
 libdatachannel is built with Mbed TLS as the WebRTC DTLS/TLS backend. The active build does not require local OpenSSL headers, libraries, executables, generated certificates, or private keys.
 
@@ -65,15 +65,19 @@ The verification script checks:
 
 ## Streaming Behavior
 
-The browser transport is WebRTC Opus. The browser creates a recvonly audio transceiver; the plugin answers with a sendonly Opus track. The sender parses the browser SDP offer and uses the offered audio MID and Opus RTP payload type when creating the outgoing track.
+The browser transport is WebRTC Opus. The browser creates a recvonly audio transceiver; the plugin answers with a sendonly Opus track. The page does not call `getUserMedia`, so browser capture processing such as echo cancellation, noise suppression, and automatic gain control is not enabled. The sender parses the browser SDP offer and uses the offered audio MID and Opus RTP payload type when creating the outgoing track.
 
-The network worker reads from the audio FIFO in approximately one Opus-frame-sized chunk, resamples to 48 kHz on the worker when needed, encodes Opus, and sends RTP through libdatachannel. This avoids the old burst-prone behavior of draining large FIFO chunks into media sends.
+The network worker reads from the audio FIFO in approximately one Opus-frame-sized chunk, resamples to 48 kHz on the worker when needed, encodes Opus, and sends RTP through libdatachannel. Opus receives exact 10 ms or 20 ms stereo frames only. This avoids the old burst-prone behavior of draining large FIFO chunks into media sends.
+
+The Opus encoder uses 48 kHz stereo `OPUS_APPLICATION_AUDIO`, music signal mode, constrained VBR at the active bitrate, DTX disabled, in-band FEC disabled, packet loss percentage 0, LSB depth 24, and default complexity 8. Complexity can fall back internally to 6 only after the encode over-budget counter increases.
+
+The native side is authoritative for the active streaming bitrate and latency mode. Browser and plugin comboboxes are synchronized to confirmed active state updates, including Auto Negotiation changes, with programmatic update guards to avoid UI feedback loops.
 
 RTP accounting is explicit:
 
 - encoded packet counters advance only after a frame is successfully emitted to at least one open track
 - RTP timestamp cursor advances only for audio actually sent to at least one open track
-- sender diagnostics expose RTP attempts, successful sends, and send failures
+- sender diagnostics expose RTP attempts, successful sends, send failures, negotiated payload type, SSRC, sequence/timestamp cursor, submitted track packets/bytes, Opus packet size, and input RMS
 
 FIFO polling is not treated as an underrun when there are simply not enough frames yet. Server FIFO underruns are reserved for real source starvation after the worker has seen source audio.
 

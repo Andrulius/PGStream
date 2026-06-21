@@ -86,12 +86,21 @@ struct StreamConfig
         return "about 40-90 ms";
     }
 
+    int playoutDelayHintMs() const
+    {
+        if (latencyMode == LatencyMode::safe)
+            return 150;
+        if (latencyMode == LatencyMode::lowLatency || latencyMode == LatencyMode::ultraLowExperimental)
+            return 30;
+        return 80;
+    }
+
     int opusFrameDurationMs() const
     {
         if (latencyMode == LatencyMode::lowLatency)
             return 10;
         if (latencyMode == LatencyMode::ultraLowExperimental)
-            return 5;
+            return 10;
         return 20;
     }
 };
@@ -110,13 +119,27 @@ struct StreamStats
     juce::String statusText;
     juce::String transportMode;
     int inputSampleRate = 48000;
+    int selectedOpusBitrateBps = 320000;
+    juce::String selectedOpusBitratePreset;
     int opusBitrateBps = 320000;
     juce::String opusBitratePreset;
     juce::String opusCodec { "opus/48000/2" };
     bool opusBitrateLimited = false;
+    juce::String selectedLatencyMode;
     juce::String latencyMode;
     juce::String latencyTarget;
     int opusFrameDurationMs = 20;
+    int activePlayoutDelayHintMs = 80;
+    bool autonegotiationEnabled = false;
+    juce::String autonegotiationMode;
+    juce::String autonegotiationState;
+    juce::String lastAdaptationReason;
+    juce::String lastAdaptationTimestamp;
+    uint64_t stateRevision = 0;
+    juce::String stateOrigin;
+    juce::String lastUserRequestedBitratePreset;
+    juce::String lastUserRequestedLatencyMode;
+    juce::String lastStateUpdateSentTimestamp;
     uint64_t framesSent = 0;
     uint64_t serverFifoUnderruns = 0;
     uint64_t fifoDroppedFrames = 0;
@@ -130,7 +153,24 @@ struct StreamStats
     uint64_t webrtcRtpPacketsAttempted = 0;
     uint64_t webrtcRtpPacketsSent = 0;
     uint64_t webrtcRtpSendFailures = 0;
+    uint64_t webrtcEncodeOverBudgetCount = 0;
     uint64_t webrtcEncoderOverloadWarnings = 0;
+    int webrtcNegotiatedPayloadType = 111;
+    int webrtcActualPayloadType = 111;
+    uint32_t webrtcSsrc = 0;
+    uint16_t webrtcSequenceCurrent = 0;
+    uint32_t webrtcTimestampCurrent = 0;
+    uint32_t webrtcTimestampIncrementExpected = 960;
+    uint32_t webrtcTimestampIncrementActual = 0;
+    uint64_t webrtcTimestampAnomalyCount = 0;
+    uint64_t webrtcPacketsSubmittedToTrack = 0;
+    uint64_t webrtcBytesSubmittedToTrack = 0;
+    uint64_t webrtcSubmitErrors = 0;
+    uint64_t opusEncodeErrors = 0;
+    int opusPacketBytesLast = 0;
+    double opusPacketBytesAvg = 0.0;
+    double inputRmsL = 0.0;
+    double inputRmsR = 0.0;
     juce::String webrtcConnectionState;
     juce::String webrtcIceConnectionState;
     juce::StringArray candidateLanUrls;
