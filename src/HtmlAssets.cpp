@@ -18,12 +18,6 @@ bool getHtmlAsset(const char* uri, HtmlAsset& asset)
         return true;
     }
 
-    if (std::strcmp(uri, "/audio-worklet.js") == 0)
-    {
-        asset = { PGStreamBinaryData::audioworklet_js, static_cast<size_t> (PGStreamBinaryData::audioworklet_jsSize), "application/javascript; charset=utf-8" };
-        return true;
-    }
-
     if (std::strcmp(uri, "/style.css") == 0)
     {
         asset = { PGStreamBinaryData::style_css, static_cast<size_t> (PGStreamBinaryData::style_cssSize), "text/css; charset=utf-8" };

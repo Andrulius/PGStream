@@ -1,6 +1,6 @@
 {
   "Name": "PGStream",
-  "Version": "0.4.0",
+  "Version": "0.5.0",
   "Factory Info": {
     "Vendor": "PigeonStream",
     "URL": "https://pigeonstream.local",
@@ -17,7 +17,7 @@
       "Category": "Audio Module Class",
       "Name": "PGStream",
       "Vendor": "PigeonStream",
-      "Version": "0.4.0",
+      "Version": "0.5.0",
       "SDKVersion": "VST 3.8.0",
       "Sub Categories": [
         "Fx",
@@ -33,7 +33,7 @@
       "Category": "Component Controller Class",
       "Name": "PGStream",
       "Vendor": "PigeonStream",
-      "Version": "0.4.0",
+      "Version": "0.5.0",
       "SDKVersion": "VST 3.8.0",
       "Sub Categories": [
         "Fx",

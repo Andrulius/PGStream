@@ -44,13 +44,19 @@ public:
 
 private:
     struct Peer;
+    struct SendResult
+    {
+        uint64_t attempted = 0;
+        uint64_t sent = 0;
+        uint64_t failed = 0;
+    };
 
     using PeerPtr = std::shared_ptr<Peer>;
 
     void configureEncoderIfNeeded();
     void recreateEncoder();
-    void sendEncodedFrame(const uint8_t* data, size_t bytes, uint64_t frameStartSample);
-    void sendEncodedFrameLocked(const uint8_t* data, size_t bytes, uint64_t frameStartSample);
+    void resetCountersLocked();
+    SendResult sendEncodedFrameLocked(const uint8_t* data, size_t bytes, uint64_t frameStartSample);
     void sendJson(mg_connection* connection, const juce::String& json) const;
     void closePeer(PeerPtr peer);
     PeerPtr findPeer(mg_connection* connection) const;
@@ -75,6 +81,9 @@ private:
     std::atomic<uint64_t> encodedPackets { 0 };
     std::atomic<uint64_t> encodedBytes { 0 };
     std::atomic<uint64_t> sendCalls { 0 };
+    std::atomic<uint64_t> rtpPacketsAttempted { 0 };
+    std::atomic<uint64_t> rtpPacketsSent { 0 };
+    std::atomic<uint64_t> rtpSendFailures { 0 };
     std::atomic<uint64_t> encoderOverloadWarnings { 0 };
 };
 }

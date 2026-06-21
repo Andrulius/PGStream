@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(PGStream VERSION 0.4.0 LANGUAGES C CXX)
+project(PGStream VERSION 0.5.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -84,7 +84,6 @@ juce_add_binary_data(PGStreamAssets
     SOURCES
         assets/web/index.html
         assets/web/app.js
-        assets/web/audio-worklet.js
         assets/web/style.css
         assets/logo.png
         assets/pgs.png)
@@ -114,7 +113,6 @@ target_sources(PGStream
         src/AudioTapFifo.cpp
         src/NetworkServer.cpp
         src/NetworkInterfaceUtils.cpp
-        src/WebSocketHub.cpp
         src/WebRtcAudioSender.cpp
         src/Resampler.cpp
         src/HtmlAssets.cpp)
@@ -127,14 +125,6 @@ target_compile_definitions(PGStream
         WIN32_LEAN_AND_MEAN
         NOMINMAX
         _CRT_SECURE_NO_WARNINGS)
-
-if(MSVC)
-    target_compile_options(PGStream
-        PRIVATE
-            /MP1
-            $<$<CONFIG:Release>:/Od>
-            $<$<CONFIG:Release>:/Ob0>)
-endif()
 
 target_include_directories(PGStream
     PRIVATE

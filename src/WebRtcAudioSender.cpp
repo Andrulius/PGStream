@@ -230,6 +230,18 @@ void WebRtcAudioSender::recreateEncoder()
     encodedSampleCursor = 0;
 }
 
+void WebRtcAudioSender::resetCountersLocked()
+{
+    encodedFrames.store(0, std::memory_order_relaxed);
+    encodedPackets.store(0, std::memory_order_relaxed);
+    encodedBytes.store(0, std::memory_order_relaxed);
+    sendCalls.store(0, std::memory_order_relaxed);
+    rtpPacketsAttempted.store(0, std::memory_order_relaxed);
+    rtpPacketsSent.store(0, std::memory_order_relaxed);
+    rtpSendFailures.store(0, std::memory_order_relaxed);
+    encoderOverloadWarnings.store(0, std::memory_order_relaxed);
+}
+
 void WebRtcAudioSender::handleOffer(mg_connection* connection, const juce::var& message)
 {
     if (connection == nullptr)
@@ -246,7 +258,6 @@ void WebRtcAudioSender::handleOffer(mg_connection* connection, const juce::var& 
     {
         std::lock_guard<std::mutex> lock(mutex);
         peerConfig = config;
-        peerConfig.transportMode = TransportMode::webrtcOpus;
         peerConfig.opusBitrateMode = parseBitrateMode(message, peerConfig.opusBitrateMode);
         peerConfig.latencyMode = parseLatencyMode(message, peerConfig.latencyMode);
         config.opusBitrateMode = peerConfig.opusBitrateMode;
@@ -348,6 +359,9 @@ void WebRtcAudioSender::handleOffer(mg_connection* connection, const juce::var& 
                 peers.erase(it);
             }
 
+            if (peers.empty())
+                resetCountersLocked();
+
             peers[connection] = peer;
         }
 
@@ -398,6 +412,12 @@ void WebRtcAudioSender::removeConnection(mg_connection* connection)
 
         peer = it->second;
         peers.erase(it);
+        if (peers.empty())
+        {
+            pendingFrames = 0;
+            encodedSampleCursor = 0;
+            resetCountersLocked();
+        }
     }
 
     closePeer(peer);
@@ -412,6 +432,8 @@ void WebRtcAudioSender::clear()
             toClose.push_back(entry.second);
         peers.clear();
         pendingFrames = 0;
+        encodedSampleCursor = 0;
+        resetCountersLocked();
     }
 
     for (auto& peer : toClose)
@@ -492,29 +514,27 @@ void WebRtcAudioSender::encodeAndSend(const float* interleavedStereo48k, size_t 
 
         if (encoded > 0)
         {
-            sendEncodedFrameLocked(opusPacket.data(),
-                                   static_cast<size_t> (encoded),
-                                   encodedSampleCursor);
-            encodedFrames.fetch_add(encoderFrameFrames, std::memory_order_relaxed);
-            encodedPackets.fetch_add(1, std::memory_order_relaxed);
-            encodedBytes.fetch_add(static_cast<uint64_t> (encoded), std::memory_order_relaxed);
+            const auto sent = sendEncodedFrameLocked(opusPacket.data(),
+                                                     static_cast<size_t> (encoded),
+                                                     encodedSampleCursor);
+            if (sent.sent > 0)
+            {
+                encodedFrames.fetch_add(encoderFrameFrames, std::memory_order_relaxed);
+                encodedPackets.fetch_add(1, std::memory_order_relaxed);
+                encodedBytes.fetch_add(static_cast<uint64_t> (encoded), std::memory_order_relaxed);
+                encodedSampleCursor += encoderFrameFrames;
+            }
         }
 
-        encodedSampleCursor += encoderFrameFrames;
         pendingFrames = 0;
     }
 }
 
-void WebRtcAudioSender::sendEncodedFrame(const uint8_t* data, size_t bytes, uint64_t frameStartSample)
+WebRtcAudioSender::SendResult WebRtcAudioSender::sendEncodedFrameLocked(const uint8_t* data, size_t bytes, uint64_t frameStartSample)
 {
-    std::lock_guard<std::mutex> lock(mutex);
-    sendEncodedFrameLocked(data, bytes, frameStartSample);
-}
-
-void WebRtcAudioSender::sendEncodedFrameLocked(const uint8_t* data, size_t bytes, uint64_t frameStartSample)
-{
+    SendResult result;
     if (data == nullptr || bytes == 0)
-        return;
+        return result;
 
     const auto seconds = std::chrono::duration<double>(static_cast<double> (frameStartSample) / opusSampleRate);
     auto* byteData = reinterpret_cast<const rtc::byte*> (data);
@@ -525,16 +545,28 @@ void WebRtcAudioSender::sendEncodedFrameLocked(const uint8_t* data, size_t bytes
         if (peer == nullptr || peer->track == nullptr || ! peer->open.load(std::memory_order_acquire))
             continue;
 
+        ++result.attempted;
         try
         {
             peer->track->sendFrame(byteData, bytes, rtc::FrameInfo(seconds));
             sendCalls.fetch_add(1, std::memory_order_relaxed);
+            ++result.sent;
         }
         catch (...)
         {
             peer->open.store(false, std::memory_order_release);
+            ++result.failed;
         }
     }
+
+    if (result.attempted > 0)
+        rtpPacketsAttempted.fetch_add(result.attempted, std::memory_order_relaxed);
+    if (result.sent > 0)
+        rtpPacketsSent.fetch_add(result.sent, std::memory_order_relaxed);
+    if (result.failed > 0)
+        rtpSendFailures.fetch_add(result.failed, std::memory_order_relaxed);
+
+    return result;
 }
 
 void WebRtcAudioSender::resetAudio()
@@ -576,6 +608,9 @@ void WebRtcAudioSender::fillStats(StreamStats& stats) const
     stats.webrtcEncodedPackets = encodedPackets.load(std::memory_order_relaxed);
     stats.webrtcEncodedBytes = encodedBytes.load(std::memory_order_relaxed);
     stats.webrtcSendCalls = sendCalls.load(std::memory_order_relaxed);
+    stats.webrtcRtpPacketsAttempted = rtpPacketsAttempted.load(std::memory_order_relaxed);
+    stats.webrtcRtpPacketsSent = rtpPacketsSent.load(std::memory_order_relaxed);
+    stats.webrtcRtpSendFailures = rtpSendFailures.load(std::memory_order_relaxed);
     stats.webrtcEncoderOverloadWarnings = encoderOverloadWarnings.load(std::memory_order_relaxed);
 
     PeerPtr newestPeer;

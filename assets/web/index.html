@@ -22,13 +22,6 @@
 
     <section class="controls" aria-label="Stream controls">
       <label>
-        <span>Transport</span>
-        <select id="transportSelect">
-          <option value="webrtc">WebRTC Opus - Recommended</option>
-          <option value="legacy">WebSocket Legacy - Fallback</option>
-        </select>
-      </label>
-      <label>
         <span>Bitrate</span>
         <select id="bitrateSelect">
           <option value="128000">128 kb/s Good Preview</option>
@@ -144,34 +137,28 @@
             <span>WebRTC open tracks</span>
             <strong id="webrtcOpenTracks">0</strong>
           </div>
-        </div>
-      </div>
-
-      <div class="nerd-group">
-        <h2>Legacy Fallback</h2>
-        <div class="grid">
           <div class="metric">
-            <span>WebSocket state</span>
-            <strong id="webSocketState">closed</strong>
+            <span>Signaling socket</span>
+            <strong id="signalingState">closed</strong>
           </div>
           <div class="metric">
-            <span>Client buffer fill</span>
-            <strong id="clientBufferFillMs">0 ms</strong>
+            <span>RTP sent</span>
+            <strong id="rtpSent">0</strong>
           </div>
           <div class="metric">
-            <span>Received packets total</span>
-            <strong id="packetsTotal">0</strong>
+            <span>RTP send failures</span>
+            <strong id="rtpFailures">0</strong>
           </div>
           <div class="metric">
-            <span>AudioWorklet underruns</span>
-            <strong id="clientWorkletUnderruns">0</strong>
+            <span>RTP attempts</span>
+            <strong id="rtpAttempts">0</strong>
           </div>
         </div>
       </div>
     </section>
 
     <p id="warning" class="warning">
-      This LAN page is served over plain HTTP and WS. Use it only on a trusted local network.
+      This LAN page is served over plain HTTP and uses WS for WebRTC signaling. Use it only on a trusted local network.
     </p>
   </main>
   <script src="/app.js"></script>

@@ -43,17 +43,17 @@ function Select-Preset {
     $instances = & $vswhere -all -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -format json | ConvertFrom-Json
     $vs2026 = $instances | Where-Object { $_.installationVersion -like "18.*" } | Select-Object -First 1
     if ($vs2026) {
-        return @{ Configure = "vs2026-x64-safe"; Build = "vs2026-safe-release"; Instance = $vs2026.displayName }
+        return @{ Configure = "vs2026-x64"; Build = "vs2026-release"; Instance = $vs2026.displayName }
     }
 
     $vs2022 = $instances | Where-Object { $_.installationVersion -like "17.*" } | Select-Object -First 1
     if ($vs2022) {
-        return @{ Configure = "vs2022-x64-safe"; Build = "vs2022-safe-release"; Instance = $vs2022.displayName }
+        return @{ Configure = "vs2022-x64"; Build = "vs2022-release"; Instance = $vs2022.displayName }
     }
 
     $vs2019 = $instances | Where-Object { $_.installationVersion -like "16.*" } | Select-Object -First 1
     if ($vs2019) {
-        return @{ Configure = "vs2019-x64-safe"; Build = "vs2019-safe-release"; Instance = $vs2019.displayName }
+        return @{ Configure = "vs2019-x64"; Build = "vs2019-release"; Instance = $vs2019.displayName }
     }
 
     throw "No VS 2026, VS 2022, or VS 2019 C++ toolchain was found."
@@ -100,8 +100,8 @@ if ($LASTEXITCODE -ne 0) {
     throw "CMake configure failed."
 }
 
-Write-Host "Command: $cmake --build --preset $($preset.Build) --parallel 1"
-& $cmake --build --preset $preset.Build --parallel 1
+Write-Host "Command: $cmake --build --preset $($preset.Build)"
+& $cmake --build --preset $preset.Build
 if ($LASTEXITCODE -ne 0) {
     throw "CMake build failed."
 }

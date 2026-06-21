@@ -5,7 +5,6 @@
 #include "Resampler.h"
 #include "StreamTypes.h"
 #include "WebRtcAudioSender.h"
-#include "WebSocketHub.h"
 #include <juce_core/juce_core.h>
 #include <atomic>
 #include <mutex>
@@ -45,19 +44,6 @@ private:
     static int logHandler(const mg_connection*, const char*);
 
     void handleWebSocketText(mg_connection* connection, const char* data, size_t dataLen);
-    void buildAndBroadcastFrame(const float* interleavedStereo,
-                                size_t frameCount,
-                                const StreamConfig& frameConfig,
-                                int sampleRate,
-                                bool silence);
-    void appendAndBroadcastPackets(const float* interleavedStereo,
-                                   size_t frameCount,
-                                   const StreamConfig& frameConfig,
-                                   int sampleRate,
-                                   size_t packetFrames);
-    void resetPacketAccumulator();
-    void appendU16(uint16_t value);
-    void appendU32(uint32_t value);
 
     AudioTapFifo& fifo;
     mutable std::mutex configMutex;
@@ -74,25 +60,15 @@ private:
     std::atomic<bool> enabled { false };
     std::atomic<bool> contextRunning { false };
     std::atomic<double> sessionSampleRate { 48000.0 };
-    std::atomic<uint32_t> sequence { 0 };
     std::atomic<uint64_t> framesSent { 0 };
     std::atomic<uint64_t> serverFifoUnderruns { 0 };
-    std::atomic<uint64_t> networkPacketsSent { 0 };
-    std::atomic<uint64_t> websocketSendFailures { 0 };
 
     mg_context* context = nullptr;
-    WebSocketHub hub;
     WebRtcAudioSender webrtcSender;
-    Resampler resampler;
     Resampler webrtcResampler;
 
     std::vector<float> readBuffer;
-    std::vector<float> resampledBuffer;
     std::vector<float> webrtcResampledBuffer;
-    std::vector<float> packetBuffer;
-    size_t packetBufferFrames = 0;
-    std::vector<float> silenceBuffer;
     std::vector<float> webrtcSilenceBuffer;
-    std::vector<uint8_t> frameBuffer;
 };
 }

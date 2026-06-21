@@ -50,24 +50,14 @@ private:
     juce::ToggleButton enableStreamButton { "Enable Stream" };
     CircularTextButton infoButton { "i" };
     juce::Slider portSlider;
-    juce::ComboBox transportBox;
     juce::ComboBox bitrateBox;
     juce::ComboBox latencyBox;
-    juce::ComboBox formatBox;
-    juce::ComboBox sampleRateBox;
-    juce::ComboBox packetBox;
-    juce::ComboBox bufferBox;
     juce::ToggleButton keepAliveButton { "Keep stream alive when idle" };
     juce::ToggleButton nerdButton { "Nerd" };
 
     juce::Label portLabel;
-    juce::Label transportLabel;
     juce::Label bitrateLabel;
     juce::Label latencyLabel;
-    juce::Label formatLabel;
-    juce::Label sampleRateLabel;
-    juce::Label packetLabel;
-    juce::Label bufferLabel;
     juce::Label urlLabel;
     juce::Label clientsLabel;
     juce::Label statusLabel;
@@ -85,13 +75,8 @@ private:
 
     std::unique_ptr<ButtonAttachment> enableAttachment;
     std::unique_ptr<SliderAttachment> portAttachment;
-    std::unique_ptr<ComboBoxAttachment> transportAttachment;
     std::unique_ptr<ComboBoxAttachment> bitrateAttachment;
     std::unique_ptr<ComboBoxAttachment> latencyAttachment;
-    std::unique_ptr<ComboBoxAttachment> formatAttachment;
-    std::unique_ptr<ComboBoxAttachment> sampleRateAttachment;
-    std::unique_ptr<ComboBoxAttachment> packetAttachment;
-    std::unique_ptr<ComboBoxAttachment> bufferAttachment;
     std::unique_ptr<ButtonAttachment> keepAliveAttachment;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PGStreamAudioProcessorEditor)

@@ -4,7 +4,6 @@ const els = {
   start: document.getElementById("startButton"),
   nerd: document.getElementById("nerdButton"),
   nerdPanel: document.getElementById("nerdPanel"),
-  transportSelect: document.getElementById("transportSelect"),
   bitrateSelect: document.getElementById("bitrateSelect"),
   latencySelect: document.getElementById("latencySelect"),
   remoteAudio: document.getElementById("remoteAudio"),
@@ -29,16 +28,14 @@ const els = {
   senderDroppedFrames: document.getElementById("senderDroppedFrames"),
   encoderOverloads: document.getElementById("encoderOverloads"),
   webrtcOpenTracks: document.getElementById("webrtcOpenTracks"),
-  webSocketState: document.getElementById("webSocketState"),
-  clientBufferFillMs: document.getElementById("clientBufferFillMs"),
-  packetsTotal: document.getElementById("packetsTotal"),
-  clientWorkletUnderruns: document.getElementById("clientWorkletUnderruns")
+  signalingState: document.getElementById("signalingState"),
+  rtpSent: document.getElementById("rtpSent"),
+  rtpFailures: document.getElementById("rtpFailures"),
+  rtpAttempts: document.getElementById("rtpAttempts")
 };
 
 const defaultWarning = els.warning.textContent.trim();
 
-let audioContext = null;
-let workletNode = null;
 let socket = null;
 let pc = null;
 let remoteStream = null;
@@ -48,16 +45,9 @@ let serverTimer = null;
 let rtcStatsTimer = null;
 let running = false;
 let stopping = false;
-let activeTransport = "webrtc";
 
 const client = {
-  status: "stopped",
-  clientBufferFillMs: 0,
-  packetsTotal: 0,
-  decodedFramesTotal: 0,
-  clientWorkletUnderruns: 0,
-  resyncCount: 0,
-  lastSequence: null
+  status: "stopped"
 };
 
 const rtcStats = {
@@ -77,17 +67,18 @@ const rtcStats = {
 };
 
 const server = {
-  transport: "WebRTC Opus - Recommended",
+  transport: "WebRTC Opus",
   opusBitrateBps: 320000,
   opusBitratePreset: "320 kb/s High Quality / Recommended",
   latencyPreset: "Balanced",
   latencyTarget: "about 40-90 ms",
   senderQueueFillMs: 0,
-  senderQueueFillFrames: 0,
-  senderQueueCapacityFrames: 0,
   senderDroppedFrames: 0,
   encoderOverloads: 0,
-  webrtcOpenTracks: 0
+  webrtcOpenTracks: 0,
+  rtpAttempts: 0,
+  rtpSent: 0,
+  rtpFailures: 0
 };
 
 function setStatus(status) {
@@ -96,12 +87,6 @@ function setStatus(status) {
 
 function resetClientStats() {
   client.status = "stopped";
-  client.clientBufferFillMs = 0;
-  client.packetsTotal = 0;
-  client.decodedFramesTotal = 0;
-  client.clientWorkletUnderruns = 0;
-  client.resyncCount = 0;
-  client.lastSequence = null;
   rtcStats.connectionState = "closed";
   rtcStats.iceConnectionState = "closed";
   rtcStats.packetsReceived = 0;
@@ -158,12 +143,6 @@ function applyInfo(info) {
   if (info.latencyTarget) server.latencyTarget = info.latencyTarget;
 
   if (!running) {
-    if (info.transport && info.transport.includes("Legacy")) {
-      els.transportSelect.value = "legacy";
-    } else {
-      els.transportSelect.value = "webrtc";
-    }
-
     if (info.opusBitrateBps) {
       els.bitrateSelect.value = String(info.opusBitrateBps);
     }
@@ -179,11 +158,12 @@ function applyInfo(info) {
 
   if (info.server) {
     server.senderQueueFillMs = Number(info.server.senderQueueFillMs || 0);
-    server.senderQueueFillFrames = Number(info.server.senderQueueFillFrames || 0);
-    server.senderQueueCapacityFrames = Number(info.server.senderQueueCapacityFrames || 0);
     server.senderDroppedFrames = Number(info.server.senderDroppedFrames || 0);
     server.encoderOverloads = Number(info.server.webrtcEncoderOverloadWarnings || 0);
     server.webrtcOpenTracks = Number(info.server.webrtcOpenTracks || 0);
+    server.rtpAttempts = Number(info.server.webrtcRtpPacketsAttempted || 0);
+    server.rtpSent = Number(info.server.webrtcRtpPacketsSent || info.server.webrtcSendCalls || 0);
+    server.rtpFailures = Number(info.server.webrtcRtpSendFailures || 0);
 
     if (info.server.webrtcConnectionState) {
       rtcStats.connectionState = info.server.webrtcConnectionState;
@@ -240,103 +220,6 @@ function sendJson(message) {
   }
 }
 
-function frameFormatName(format) {
-  if (format === 1) return "Float32";
-  if (format === 2) return "PCM16";
-  return `Unknown ${format}`;
-}
-
-function parseFrame(arrayBuffer) {
-  if (arrayBuffer.byteLength < 28) {
-    return null;
-  }
-
-  const view = new DataView(arrayBuffer);
-  if (view.getUint8(0) !== 0x50 || view.getUint8(1) !== 0x47 ||
-      view.getUint8(2) !== 0x53 || view.getUint8(3) !== 0x31) {
-    return null;
-  }
-
-  const protocolVersion = view.getUint32(4, true);
-  if (protocolVersion !== 1) {
-    return null;
-  }
-
-  const frame = {
-    sequence: view.getUint32(8, true),
-    sampleRate: view.getUint32(12, true),
-    channels: view.getUint16(16, true),
-    format: view.getUint16(18, true),
-    frameCount: view.getUint32(20, true),
-    payload: arrayBuffer.slice(28)
-  };
-
-  return frame.channels === 2 ? frame : null;
-}
-
-function decodeFrame(frame) {
-  const expectedSamples = frame.frameCount * 2;
-
-  if (frame.format === 1) {
-    if (frame.payload.byteLength % Float32Array.BYTES_PER_ELEMENT !== 0) return null;
-    let samples = new Float32Array(frame.payload);
-    if (samples.length < expectedSamples) return null;
-    if (samples.length > expectedSamples) samples = samples.slice(0, expectedSamples);
-    return { samples, frameCount: expectedSamples / 2 };
-  }
-
-  if (frame.format === 2) {
-    if (frame.payload.byteLength % Int16Array.BYTES_PER_ELEMENT !== 0) return null;
-    const pcm = new Int16Array(frame.payload);
-    if (pcm.length < expectedSamples) return null;
-    const samples = new Float32Array(expectedSamples);
-    for (let i = 0; i < expectedSamples; ++i) {
-      samples[i] = Math.max(-1, pcm[i] / 32768);
-    }
-    return { samples, frameCount: expectedSamples / 2 };
-  }
-
-  return null;
-}
-
-function noteLegacyPacket(sequence) {
-  client.lastSequence = sequence >>> 0;
-  client.packetsTotal += 1;
-}
-
-function handleWorkletMessage(event) {
-  const message = event.data;
-  if (!message || message.type !== "status") return;
-
-  client.clientBufferFillMs = Number(message.clientBufferFillMs || message.bufferMs || 0);
-  client.clientWorkletUnderruns = Number(message.clientWorkletUnderruns || 0);
-  client.resyncCount = Number(message.resyncCount || 0);
-
-  if (running && activeTransport === "legacy" && message.playbackState) {
-    setStatus(message.playbackState);
-  }
-}
-
-function handleLegacyAudioMessage(arrayBuffer) {
-  if (!workletNode) return;
-
-  const frame = parseFrame(arrayBuffer);
-  if (!frame) return;
-
-  const decoded = decodeFrame(frame);
-  if (!decoded) return;
-
-  noteLegacyPacket(frame.sequence);
-  client.decodedFramesTotal += decoded.frameCount;
-  rtcStats.codec = `legacy ${frameFormatName(frame.format)} ${frame.sampleRate} Hz`;
-
-  workletNode.port.postMessage({
-    type: "audio",
-    frameCount: decoded.frameCount,
-    samples: decoded.samples.buffer
-  }, [decoded.samples.buffer]);
-}
-
 async function handleSignalMessage(message) {
   if (!message || typeof message !== "object") return;
 
@@ -357,27 +240,21 @@ async function handleSignalMessage(message) {
 }
 
 function handleSocketMessage(event) {
-  if (typeof event.data === "string") {
-    try {
-      handleSignalMessage(JSON.parse(event.data)).catch((error) => {
-        els.warning.textContent = error.message;
-        setStatus("error");
-      });
-    } catch {
-      // Ignore non-JSON control text.
-    }
-    return;
-  }
+  if (typeof event.data !== "string") return;
 
-  if (activeTransport === "legacy") {
-    handleLegacyAudioMessage(event.data);
+  try {
+    handleSignalMessage(JSON.parse(event.data)).catch((error) => {
+      els.warning.textContent = error.message;
+      setStatus("error");
+    });
+  } catch {
+    // Ignore non-JSON control text.
   }
 }
 
 function createSocket() {
   const wsUrl = `ws://${window.location.host}/ws`;
   socket = new WebSocket(wsUrl);
-  socket.binaryType = "arraybuffer";
   socket.onmessage = handleSocketMessage;
   socket.onerror = () => {
     if (running && !stopping) {
@@ -393,7 +270,6 @@ function createSocket() {
 }
 
 async function startWebRtc() {
-  activeTransport = "webrtc";
   rtcStats.codec = "opus/48000/2";
   remoteStream = new MediaStream();
   els.remoteAudio.srcObject = remoteStream;
@@ -454,41 +330,6 @@ async function startWebRtc() {
   };
 }
 
-async function startLegacyAudio() {
-  activeTransport = "legacy";
-  const info = await fetchInfo();
-  applyInfo(info);
-
-  const streamRate = Number(info.sampleRate || 48000);
-  const targetBufferMs = Number(info.bufferTargetMs || 100);
-
-  audioContext = new AudioContext({ sampleRate: streamRate });
-  await audioContext.audioWorklet.addModule("/audio-worklet.js");
-
-  workletNode = new AudioWorkletNode(audioContext, "pgstream-player", {
-    numberOfInputs: 0,
-    numberOfOutputs: 1,
-    outputChannelCount: [2]
-  });
-
-  workletNode.port.onmessage = handleWorkletMessage;
-  workletNode.port.postMessage({
-    type: "configure",
-    sampleRate: streamRate,
-    contextSampleRate: audioContext.sampleRate,
-    bufferTargetMs: targetBufferMs
-  });
-
-  workletNode.connect(audioContext.destination);
-  await audioContext.resume();
-
-  const legacySocket = createSocket();
-  legacySocket.onopen = () => {
-    sendJson({ type: "legacy-start" });
-    setStatus("buffering");
-  };
-}
-
 async function startAudio() {
   if (running || stopping) return;
 
@@ -502,11 +343,7 @@ async function startAudio() {
   renderUi();
 
   try {
-    if (els.transportSelect.value === "legacy") {
-      await startLegacyAudio();
-    } else {
-      await startWebRtc();
-    }
+    await startWebRtc();
   } catch (error) {
     els.warning.textContent = error.message;
     await stopAudio("error");
@@ -524,11 +361,7 @@ async function stopAudio(finalStatus = "stopped") {
   setStatus("stopping");
   renderUi();
 
-  if (activeTransport === "webrtc") {
-    sendJson({ type: "webrtc-stop" });
-  } else {
-    sendJson({ type: "legacy-stop" });
-  }
+  sendJson({ type: "webrtc-stop" });
 
   if (socket) {
     const closingSocket = socket;
@@ -556,23 +389,6 @@ async function stopAudio(finalStatus = "stopped") {
   els.remoteAudio.pause();
   els.remoteAudio.srcObject = null;
 
-  if (workletNode) {
-    try {
-      workletNode.port.postMessage({ type: "reset" });
-    } catch {
-      // The node may already be gone if the AudioContext closed first.
-    }
-
-    workletNode.disconnect();
-    workletNode.port.onmessage = null;
-    workletNode = null;
-  }
-
-  if (audioContext && audioContext.state !== "closed") {
-    await audioContext.close();
-  }
-
-  audioContext = null;
   stopTimers();
   resetClientStats();
   setStatus(finalStatus);
@@ -618,7 +434,7 @@ async function refreshRtcStats() {
     const now = performance.now();
     const bytes = Number(inbound.bytesReceived || 0);
     if (rtcStats.lastBytesAt > 0 && now > rtcStats.lastBytesAt && bytes >= rtcStats.lastBytes) {
-      rtcStats.actualBitrateKbps = ((bytes - rtcStats.lastBytes) * 8) / ((now - rtcStats.lastBytesAt));
+      rtcStats.actualBitrateKbps = ((bytes - rtcStats.lastBytes) * 8) / (now - rtcStats.lastBytesAt);
     }
     rtcStats.lastBytes = bytes;
     rtcStats.lastBytesAt = now;
@@ -640,11 +456,9 @@ async function refreshRtcStats() {
 
 function renderUi() {
   els.connection.textContent = client.status;
-  els.transport.textContent = activeTransport === "legacy" ? "WebSocket Legacy" : "WebRTC Opus";
-  els.codec.textContent = activeTransport === "legacy" ? rtcStats.codec : rtcStats.codec;
-  els.bitrate.textContent = activeTransport === "legacy"
-    ? "legacy PCM"
-    : bitrateLabel(Number(els.bitrateSelect.value));
+  els.transport.textContent = "WebRTC Opus";
+  els.codec.textContent = rtcStats.codec;
+  els.bitrate.textContent = bitrateLabel(Number(els.bitrateSelect.value));
 
   els.rtcConnectionState.textContent = pc ? pc.connectionState : rtcStats.connectionState;
   els.iceConnectionState.textContent = pc ? pc.iceConnectionState : rtcStats.iceConnectionState;
@@ -663,11 +477,10 @@ function renderUi() {
   els.senderDroppedFrames.textContent = String(server.senderDroppedFrames);
   els.encoderOverloads.textContent = String(server.encoderOverloads);
   els.webrtcOpenTracks.textContent = String(server.webrtcOpenTracks);
-
-  els.webSocketState.textContent = socketStateName();
-  els.clientBufferFillMs.textContent = `${Math.round(client.clientBufferFillMs)} ms`;
-  els.packetsTotal.textContent = String(client.packetsTotal);
-  els.clientWorkletUnderruns.textContent = String(client.clientWorkletUnderruns);
+  els.signalingState.textContent = socketStateName();
+  els.rtpSent.textContent = String(server.rtpSent);
+  els.rtpFailures.textContent = String(server.rtpFailures);
+  els.rtpAttempts.textContent = String(server.rtpAttempts);
 }
 
 els.start.addEventListener("click", () => {
