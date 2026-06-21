@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Added browser Auto Negotiation for WebRTC Opus bitrate and latency profiles.
+- Based Auto Negotiation decisions only on browser WebRTC `packetsLost` delta after a 1 second warm-up; success requires 3 continuous seconds without packet loss delta.
+- Kept plugin FIFO underruns as a separate diagnostic that does not affect Auto Negotiation profile selection.
+
 ## 0.5 - 2026-06-21
 
 - Removed the legacy WebSocket binary audio fallback and AudioWorklet browser player.

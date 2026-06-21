@@ -64,6 +64,26 @@ The project image `assets/pgs.png` is embedded in the plugin binary and shown in
 
 The plugin editor About panel opens from the small `i` button and closes with its `X` button. It displays the embedded `assets/logo.png` image, plugin name, version 0.5, author, description, copyright, project link, and AGPL license note.
 
+## Browser Auto Negotiation
+
+The browser page can automatically test the existing **Opus Bitrate** and **Latency Mode** controls. It starts from 510 kb/s with Ultra Low latency, reconnects when a profile changes, waits for a 1 second warm-up, then requires 3 continuous seconds with zero browser WebRTC packet loss delta.
+
+The decision input is only browser WebRTC `packetsLost` delta:
+
+```text
+packetLossDelta = current packetsLost - baseline packetsLost
+```
+
+The baseline is captured after warm-up. A tested profile succeeds only when `packetLossDelta == 0` for the full 3 second evaluation window. Any `packetLossDelta > 0` after warm-up rejects that profile.
+
+Modes choose the next existing profile as follows:
+
+- **Quality Priority**: increase Latency Mode first, lower bitrate only when latency is already at Safe.
+- **Latency Priority**: lower bitrate first, increase Latency Mode only when bitrate is already at the lowest setting.
+- **Balanced**: alternate one latency step safer, then one bitrate step lower.
+
+If every profile fails, PGStream selects the safest available settings: 128 kb/s with Safe latency. Plugin FIFO underruns are displayed as diagnostics only; they never trigger Auto Negotiation profile changes and do not affect the final selected profile.
+
 ## Nerd Diagnostics
 
 The plugin editor and browser page each include a **Nerd** or **Stats** toggle. Diagnostics are collapsed by default.
@@ -83,6 +103,7 @@ Browser-side diagnostics show:
 - **Remote track**: browser audio track state.
 - **Signaling socket**: the WS connection used only for WebRTC signaling.
 - **RTP attempts/sent/failures**: plugin-side sender counters mirrored from `/info`.
+- **Auto Negotiation**: active state, selected mode, tested profile, elapsed warm-up/evaluation time, browser packet loss delta, profile changes, final selected profile, last rejected profile, and FIFO underruns as a separate diagnostic.
 
 ## LAN IP Selection
 

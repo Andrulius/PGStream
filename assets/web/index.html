@@ -40,6 +40,15 @@
           <option value="ultra">Ultra Low / Experimental</option>
         </select>
       </label>
+      <label>
+        <span>Auto mode</span>
+        <select id="autoModeSelect">
+          <option value="balanced" selected>Balanced</option>
+          <option value="quality">Quality Priority</option>
+          <option value="latency">Latency Priority</option>
+        </select>
+      </label>
+      <button id="autoButton" class="secondary" type="button">Auto Negotiate</button>
     </section>
 
     <audio id="remoteAudio" autoplay playsinline controls></audio>
@@ -60,6 +69,48 @@
       <div class="metric">
         <span>Bitrate</span>
         <strong id="bitrate">-</strong>
+      </div>
+
+      <div class="nerd-group">
+        <h2>Auto Negotiation</h2>
+        <div class="grid">
+          <div class="metric">
+            <span>Active</span>
+            <strong id="autoActive">inactive</strong>
+          </div>
+          <div class="metric">
+            <span>Mode</span>
+            <strong id="autoMode">-</strong>
+          </div>
+          <div class="metric">
+            <span>Tested profile</span>
+            <strong id="autoProfile">-</strong>
+          </div>
+          <div class="metric">
+            <span>Elapsed</span>
+            <strong id="autoElapsed">0.0 s</strong>
+          </div>
+          <div class="metric">
+            <span>Packet loss delta</span>
+            <strong id="autoLossDelta">0</strong>
+          </div>
+          <div class="metric">
+            <span>Profile changes</span>
+            <strong id="autoProfileChanges">0</strong>
+          </div>
+          <div class="metric">
+            <span>Server FIFO underruns</span>
+            <strong id="autoFifoUnderruns">0</strong>
+          </div>
+          <div class="metric">
+            <span>Final profile</span>
+            <strong id="autoFinalProfile">-</strong>
+          </div>
+          <div class="metric">
+            <span>Last failure</span>
+            <strong id="autoLastFailure">-</strong>
+          </div>
+        </div>
       </div>
     </section>
 

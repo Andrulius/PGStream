@@ -6,6 +6,8 @@ const els = {
   nerdPanel: document.getElementById("nerdPanel"),
   bitrateSelect: document.getElementById("bitrateSelect"),
   latencySelect: document.getElementById("latencySelect"),
+  autoModeSelect: document.getElementById("autoModeSelect"),
+  autoButton: document.getElementById("autoButton"),
   remoteAudio: document.getElementById("remoteAudio"),
   connection: document.getElementById("connection"),
   transport: document.getElementById("transport"),
@@ -31,10 +33,23 @@ const els = {
   signalingState: document.getElementById("signalingState"),
   rtpSent: document.getElementById("rtpSent"),
   rtpFailures: document.getElementById("rtpFailures"),
-  rtpAttempts: document.getElementById("rtpAttempts")
+  rtpAttempts: document.getElementById("rtpAttempts"),
+  autoActive: document.getElementById("autoActive"),
+  autoMode: document.getElementById("autoMode"),
+  autoProfile: document.getElementById("autoProfile"),
+  autoElapsed: document.getElementById("autoElapsed"),
+  autoLossDelta: document.getElementById("autoLossDelta"),
+  autoProfileChanges: document.getElementById("autoProfileChanges"),
+  autoFifoUnderruns: document.getElementById("autoFifoUnderruns"),
+  autoFinalProfile: document.getElementById("autoFinalProfile"),
+  autoLastFailure: document.getElementById("autoLastFailure")
 };
 
 const defaultWarning = els.warning.textContent.trim();
+const autoWarmupMs = 1000;
+const autoSuccessMs = 3000;
+const bitrateProfiles = [510000, 320000, 256000, 192000, 128000];
+const latencyProfiles = ["ultra", "low", "balanced", "safe"];
 
 let socket = null;
 let pc = null;
@@ -74,11 +89,30 @@ const server = {
   latencyTarget: "about 40-90 ms",
   senderQueueFillMs: 0,
   senderDroppedFrames: 0,
+  fifoUnderruns: 0,
   encoderOverloads: 0,
   webrtcOpenTracks: 0,
   rtpAttempts: 0,
   rtpSent: 0,
   rtpFailures: 0
+};
+
+const autoNegotiation = {
+  active: false,
+  mode: "balanced",
+  state: "inactive",
+  bitrateIndex: 0,
+  latencyIndex: 0,
+  balanceNext: "latency",
+  baselinePacketsLost: null,
+  warmupStartedAt: 0,
+  evaluationStartedAt: 0,
+  elapsedMs: 0,
+  lossDelta: 0,
+  profileChanges: 0,
+  finalProfile: "-",
+  lastFailure: "-",
+  transitioning: false
 };
 
 function setStatus(status) {
@@ -117,6 +151,213 @@ function latencyLabel(value) {
   return "Balanced";
 }
 
+function autoModeLabel(value) {
+  if (value === "quality") return "Quality Priority";
+  if (value === "latency") return "Latency Priority";
+  return "Balanced";
+}
+
+function profileLabel(bitrateIndex = autoNegotiation.bitrateIndex, latencyIndex = autoNegotiation.latencyIndex) {
+  return `${bitrateLabel(bitrateProfiles[bitrateIndex])} / ${latencyLabel(latencyProfiles[latencyIndex])}`;
+}
+
+function applyAutoProfile() {
+  els.bitrateSelect.value = String(bitrateProfiles[autoNegotiation.bitrateIndex]);
+  els.latencySelect.value = latencyProfiles[autoNegotiation.latencyIndex];
+}
+
+function resetAutoMeasurement(state = "connecting") {
+  autoNegotiation.state = state;
+  autoNegotiation.baselinePacketsLost = null;
+  autoNegotiation.warmupStartedAt = 0;
+  autoNegotiation.evaluationStartedAt = 0;
+  autoNegotiation.elapsedMs = 0;
+  autoNegotiation.lossDelta = 0;
+}
+
+function nextAutoProfile() {
+  const atLowestBitrate = autoNegotiation.bitrateIndex >= bitrateProfiles.length - 1;
+  const atSafestLatency = autoNegotiation.latencyIndex >= latencyProfiles.length - 1;
+
+  if (autoNegotiation.mode === "quality") {
+    if (!atSafestLatency) {
+      autoNegotiation.latencyIndex += 1;
+      return true;
+    }
+
+    if (!atLowestBitrate) {
+      autoNegotiation.bitrateIndex += 1;
+      autoNegotiation.latencyIndex = latencyProfiles.length - 1;
+      return true;
+    }
+
+    return false;
+  }
+
+  if (autoNegotiation.mode === "latency") {
+    if (!atLowestBitrate) {
+      autoNegotiation.bitrateIndex += 1;
+      return true;
+    }
+
+    if (!atSafestLatency) {
+      autoNegotiation.latencyIndex += 1;
+      autoNegotiation.bitrateIndex = 0;
+      return true;
+    }
+
+    return false;
+  }
+
+  const tryLatency = () => {
+    if (autoNegotiation.latencyIndex >= latencyProfiles.length - 1) return false;
+    autoNegotiation.latencyIndex += 1;
+    return true;
+  };
+  const tryBitrate = () => {
+    if (autoNegotiation.bitrateIndex >= bitrateProfiles.length - 1) return false;
+    autoNegotiation.bitrateIndex += 1;
+    return true;
+  };
+
+  const adjusted = autoNegotiation.balanceNext === "latency"
+    ? (tryLatency() || tryBitrate())
+    : (tryBitrate() || tryLatency());
+
+  autoNegotiation.balanceNext = autoNegotiation.balanceNext === "latency" ? "bitrate" : "latency";
+  return adjusted;
+}
+
+function setAutoWarning(text) {
+  els.warning.textContent = text || defaultWarning;
+}
+
+async function reconnectForAutoProfile() {
+  autoNegotiation.transitioning = true;
+  resetAutoMeasurement("reconnecting");
+  renderUi();
+
+  try {
+    if (running || stopping) {
+      await stopAudio("auto reconnect", { preserveAuto: true });
+    }
+
+    if (autoNegotiation.active) {
+      await startAudio({ preserveAuto: true });
+      resetAutoMeasurement("connecting");
+      setAutoWarning(`Auto negotiation testing: ${profileLabel()}`);
+    }
+  } finally {
+    autoNegotiation.transitioning = false;
+    renderUi();
+  }
+}
+
+async function startAutoNegotiation() {
+  if (autoNegotiation.active) {
+    cancelAutoNegotiation("cancelled");
+    return;
+  }
+
+  autoNegotiation.active = true;
+  autoNegotiation.mode = els.autoModeSelect.value;
+  autoNegotiation.bitrateIndex = 0;
+  autoNegotiation.latencyIndex = 0;
+  autoNegotiation.balanceNext = "latency";
+  autoNegotiation.profileChanges = 0;
+  autoNegotiation.finalProfile = "-";
+  autoNegotiation.lastFailure = "-";
+  resetAutoMeasurement("starting");
+  applyAutoProfile();
+  setAutoWarning(`Auto negotiation starting: ${profileLabel()}`);
+  await reconnectForAutoProfile();
+}
+
+function completeAutoNegotiation() {
+  autoNegotiation.active = false;
+  autoNegotiation.state = "complete";
+  autoNegotiation.finalProfile = profileLabel();
+  setAutoWarning(`Auto negotiation complete: ${autoNegotiation.finalProfile}`);
+  renderUi();
+}
+
+async function failAutoNegotiation(delta) {
+  autoNegotiation.lastFailure = `${profileLabel()} lost ${delta} packet${delta === 1 ? "" : "s"}`;
+
+  if (!nextAutoProfile()) {
+    autoNegotiation.bitrateIndex = bitrateProfiles.length - 1;
+    autoNegotiation.latencyIndex = latencyProfiles.length - 1;
+    applyAutoProfile();
+    autoNegotiation.active = false;
+    autoNegotiation.state = "failed";
+    autoNegotiation.finalProfile = profileLabel();
+    setAutoWarning("Auto negotiation could not find a zero-loss profile. Using safest available settings.");
+    renderUi();
+    return;
+  }
+
+  autoNegotiation.profileChanges += 1;
+  applyAutoProfile();
+  setAutoWarning(`Auto negotiation retrying: ${profileLabel()}`);
+  await reconnectForAutoProfile();
+}
+
+function cancelAutoNegotiation(reason = "cancelled") {
+  if (!autoNegotiation.active) return;
+
+  autoNegotiation.active = false;
+  autoNegotiation.state = reason;
+  autoNegotiation.finalProfile = reason === "cancelled" ? "-" : autoNegotiation.finalProfile;
+  setAutoWarning(reason === "cancelled" ? "Auto negotiation cancelled." : defaultWarning);
+  renderUi();
+}
+
+async function updateAutoNegotiation(inbound) {
+  if (!autoNegotiation.active || autoNegotiation.transitioning || !inbound) return;
+
+  const now = performance.now();
+  const currentPacketsLost = Number(inbound.packetsLost || 0);
+
+  if (autoNegotiation.state === "connecting" || autoNegotiation.state === "starting" || autoNegotiation.state === "reconnecting") {
+    autoNegotiation.state = "warmup";
+    autoNegotiation.warmupStartedAt = now;
+    autoNegotiation.elapsedMs = 0;
+    autoNegotiation.lossDelta = 0;
+    renderUi();
+    return;
+  }
+
+  if (autoNegotiation.state === "warmup") {
+    autoNegotiation.elapsedMs = now - autoNegotiation.warmupStartedAt;
+    if (autoNegotiation.elapsedMs >= autoWarmupMs) {
+      autoNegotiation.state = "evaluating";
+      autoNegotiation.baselinePacketsLost = currentPacketsLost;
+      autoNegotiation.evaluationStartedAt = now;
+      autoNegotiation.elapsedMs = 0;
+      autoNegotiation.lossDelta = 0;
+    }
+    renderUi();
+    return;
+  }
+
+  if (autoNegotiation.state !== "evaluating") return;
+
+  autoNegotiation.elapsedMs = now - autoNegotiation.evaluationStartedAt;
+  autoNegotiation.lossDelta = Math.max(0, currentPacketsLost - autoNegotiation.baselinePacketsLost);
+
+  if (autoNegotiation.lossDelta > 0) {
+    await failAutoNegotiation(autoNegotiation.lossDelta);
+    return;
+  }
+
+  if (autoNegotiation.elapsedMs >= autoSuccessMs) {
+    completeAutoNegotiation();
+    return;
+  }
+
+  renderUi();
+}
+
 function socketStateName() {
   if (!socket) return "closed";
   if (socket.readyState === WebSocket.CONNECTING) return "connecting";
@@ -142,7 +383,7 @@ function applyInfo(info) {
   if (info.latencyPreset) server.latencyPreset = info.latencyPreset;
   if (info.latencyTarget) server.latencyTarget = info.latencyTarget;
 
-  if (!running) {
+  if (!running && !autoNegotiation.active) {
     if (info.opusBitrateBps) {
       els.bitrateSelect.value = String(info.opusBitrateBps);
     }
@@ -159,6 +400,7 @@ function applyInfo(info) {
   if (info.server) {
     server.senderQueueFillMs = Number(info.server.senderQueueFillMs || 0);
     server.senderDroppedFrames = Number(info.server.senderDroppedFrames || 0);
+    server.fifoUnderruns = Number(info.server.serverFifoUnderruns || 0);
     server.encoderOverloads = Number(info.server.webrtcEncoderOverloadWarnings || 0);
     server.webrtcOpenTracks = Number(info.server.webrtcOpenTracks || 0);
     server.rtpAttempts = Number(info.server.webrtcRtpPacketsAttempted || 0);
@@ -330,14 +572,16 @@ async function startWebRtc() {
   };
 }
 
-async function startAudio() {
+async function startAudio(options = {}) {
   if (running || stopping) return;
 
   resetClientStats();
   running = true;
   stopping = false;
   els.start.textContent = "Stop";
-  els.warning.textContent = defaultWarning;
+  if (!options.preserveAuto) {
+    els.warning.textContent = defaultWarning;
+  }
   setStatus("connecting");
   startTimers();
   renderUi();
@@ -352,8 +596,12 @@ async function startAudio() {
   renderUi();
 }
 
-async function stopAudio(finalStatus = "stopped") {
+async function stopAudio(finalStatus = "stopped", options = {}) {
   if (stopping) return;
+
+  if (!options.preserveAuto) {
+    cancelAutoNegotiation("cancelled");
+  }
 
   stopping = true;
   running = false;
@@ -449,6 +697,14 @@ async function refreshRtcStats() {
     rtcStats.jitterBufferTargetDelayMs = typeof inbound.jitterBufferTargetDelay === "number"
       ? inbound.jitterBufferTargetDelay * 1000
       : null;
+
+    updateAutoNegotiation(inbound).catch((error) => {
+      autoNegotiation.active = false;
+      autoNegotiation.state = "error";
+      autoNegotiation.lastFailure = error.message || "auto negotiation error";
+      els.warning.textContent = autoNegotiation.lastFailure;
+      renderUi();
+    });
   } catch {
     // Stats availability varies by browser and connection state.
   }
@@ -481,6 +737,23 @@ function renderUi() {
   els.rtpSent.textContent = String(server.rtpSent);
   els.rtpFailures.textContent = String(server.rtpFailures);
   els.rtpAttempts.textContent = String(server.rtpAttempts);
+
+  els.autoActive.textContent = autoNegotiation.active ? "active" : "inactive";
+  els.autoMode.textContent = autoModeLabel(autoNegotiation.mode);
+  els.autoProfile.textContent = autoNegotiation.active || autoNegotiation.state === "complete" || autoNegotiation.state === "failed"
+    ? profileLabel()
+    : "-";
+  els.autoElapsed.textContent = `${(autoNegotiation.elapsedMs / 1000).toFixed(1)} s`;
+  els.autoLossDelta.textContent = String(autoNegotiation.lossDelta);
+  els.autoProfileChanges.textContent = String(autoNegotiation.profileChanges);
+  els.autoFifoUnderruns.textContent = String(server.fifoUnderruns);
+  els.autoFinalProfile.textContent = autoNegotiation.finalProfile;
+  els.autoLastFailure.textContent = autoNegotiation.lastFailure;
+
+  els.bitrateSelect.disabled = autoNegotiation.active;
+  els.latencySelect.disabled = autoNegotiation.active;
+  els.autoModeSelect.disabled = autoNegotiation.active;
+  els.autoButton.textContent = autoNegotiation.active ? "Cancel Auto" : "Auto Negotiate";
 }
 
 els.start.addEventListener("click", () => {
@@ -496,6 +769,16 @@ els.nerd.addEventListener("click", () => {
   els.nerd.setAttribute("aria-expanded", expanded ? "false" : "true");
   els.nerdPanel.hidden = expanded;
   renderUi();
+});
+
+els.autoButton.addEventListener("click", () => {
+  startAutoNegotiation().catch((error) => {
+    autoNegotiation.active = false;
+    autoNegotiation.state = "error";
+    autoNegotiation.lastFailure = error.message || "auto negotiation error";
+    els.warning.textContent = autoNegotiation.lastFailure;
+    renderUi();
+  });
 });
 
 refreshServerInfo();
