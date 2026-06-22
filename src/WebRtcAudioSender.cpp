@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <random>
 #include <sstream>
 
@@ -20,6 +21,17 @@ constexpr int maxRtpPayloadType = 127;
 constexpr int defaultOpusComplexity = 8;
 constexpr int fallbackOpusComplexity = 6;
 constexpr double encodeBudgetRatio = 0.75;
+constexpr size_t pcmChannels = 2;
+constexpr size_t defaultPcmPacketFrames = 480;
+constexpr size_t pcmHeaderBytes = 40;
+constexpr size_t pcmBackpressureWarningBytes = 128u * 1024u;
+constexpr size_t pcmBackpressureDangerBytes = 256u * 1024u;
+constexpr size_t pcmBackpressurePanicBytes = 512u * 1024u;
+constexpr uint32_t pcmFlagFirstPacket = 1u << 0u;
+constexpr uint32_t pcmFlagFormatChanged = 1u << 1u;
+constexpr uint32_t pcmFlagDiscontinuity = 1u << 2u;
+constexpr uint32_t pcmFlagSenderDroppedOldAudio = 1u << 3u;
+constexpr uint32_t pcmFlagClippingDetected = 1u << 4u;
 
 juce::String jsonString(const juce::String& value)
 {
@@ -53,6 +65,51 @@ int propertyInt(const juce::var& object, const char* name, int fallback)
     return text.isNotEmpty() ? text.getIntValue() : fallback;
 }
 
+double propertyDouble(const juce::var& object, const char* name, double fallback)
+{
+    const auto value = property(object, name);
+    if (value.isInt() || value.isInt64() || value.isDouble() || value.isBool())
+        return static_cast<double> (value);
+
+    const auto text = value.toString();
+    return text.isNotEmpty() ? text.getDoubleValue() : fallback;
+}
+
+bool propertyBool(const juce::var& object, const char* name, bool fallback)
+{
+    const auto value = property(object, name);
+    if (value.isBool())
+        return static_cast<bool> (value);
+    if (value.isInt() || value.isInt64() || value.isDouble())
+        return static_cast<int> (value) != 0;
+
+    const auto text = value.toString().toLowerCase();
+    if (text == "true" || text == "yes" || text == "1")
+        return true;
+    if (text == "false" || text == "no" || text == "0")
+        return false;
+
+    return fallback;
+}
+
+TransportMode parseTransportMode(const juce::var& message, TransportMode fallback)
+{
+    const auto value = propertyString(message, "transportMode").toLowerCase();
+
+    if (value.contains("pcm16") || value.contains("pcm-16"))
+        return TransportMode::pcm16DataChannel;
+    if (value.contains("pcm24") || value.contains("pcm-24"))
+        return TransportMode::pcm24DataChannel;
+    if (value.contains("pcm32") || value.contains("pcm-32") || value.contains("float"))
+        return TransportMode::pcm32FloatDataChannel;
+    if (value.contains("auto"))
+        return TransportMode::autoSelect;
+    if (value.contains("opus"))
+        return TransportMode::opusWebRtc;
+
+    return fallback;
+}
+
 OpusBitrateMode parseBitrateMode(const juce::var& message, OpusBitrateMode fallback)
 {
     const auto preset = propertyString(message, "bitratePreset").toLowerCase();
@@ -76,14 +133,16 @@ LatencyMode parseLatencyMode(const juce::var& message, LatencyMode fallback)
 {
     const auto preset = propertyString(message, "latencyPreset").toLowerCase();
 
+    if (preset.contains("very"))
+        return LatencyMode::verySafe;
     if (preset.contains("safe"))
         return LatencyMode::safe;
     if (preset.contains("ultra"))
         return LatencyMode::ultraLowExperimental;
     if (preset.contains("low"))
         return LatencyMode::lowLatency;
-    if (preset.contains("balanced"))
-        return LatencyMode::balanced;
+    if (preset.contains("medium") || preset.contains("balanced"))
+        return LatencyMode::medium;
 
     return fallback;
 }
@@ -104,6 +163,50 @@ std::string opusFmtp(const StreamConfig& config)
 std::string toStdString(const juce::String& value)
 {
     return value.toStdString();
+}
+
+void writeU16Le(std::vector<uint8_t>& data, size_t offset, uint16_t value)
+{
+    data[offset] = static_cast<uint8_t> (value & 0xffu);
+    data[offset + 1] = static_cast<uint8_t> ((value >> 8u) & 0xffu);
+}
+
+void writeU32Le(std::vector<uint8_t>& data, size_t offset, uint32_t value)
+{
+    for (size_t i = 0; i < 4; ++i)
+        data[offset + i] = static_cast<uint8_t> ((value >> (i * 8u)) & 0xffu);
+}
+
+void writeU64Le(std::vector<uint8_t>& data, size_t offset, uint64_t value)
+{
+    for (size_t i = 0; i < 8; ++i)
+        data[offset + i] = static_cast<uint8_t> ((value >> (i * 8u)) & 0xffu);
+}
+
+int32_t floatToPcm24(float value)
+{
+    const auto clipped = juce::jlimit(-1.0f, 1.0f, value);
+    return static_cast<int32_t> (std::lrint(static_cast<double> (clipped) * 8388607.0));
+}
+
+int16_t floatToPcm16(float value)
+{
+    const auto clipped = juce::jlimit(-1.0f, 1.0f, value);
+    return static_cast<int16_t> (std::lrint(static_cast<double> (clipped) * 32767.0));
+}
+
+bool isClippedForIntegerPcm(float value)
+{
+    return value < -1.0f || value > 1.0f;
+}
+
+uint32_t float32ToBits(float value)
+{
+    const auto sanitized = std::isfinite(value) ? value : 0.0f;
+    uint32_t bits = 0;
+    static_assert(sizeof(bits) == sizeof(sanitized), "float32 size mismatch");
+    std::memcpy(&bits, &sanitized, sizeof(bits));
+    return bits;
 }
 
 struct OfferAudioInfo
@@ -160,8 +263,12 @@ struct WebRtcAudioSender::Peer
     mg_connection* connection = nullptr;
     std::shared_ptr<rtc::PeerConnection> pc;
     std::shared_ptr<rtc::Track> track;
+    std::shared_ptr<rtc::DataChannel> dataChannel;
     std::shared_ptr<rtc::RtpPacketizationConfig> rtpConfig;
+    TransportMode transportMode = TransportMode::opusWebRtc;
     std::atomic<bool> open { false };
+    std::atomic<bool> pcmOpen { false };
+    std::atomic<bool> pcmReceiverReady { false };
     std::atomic<int> state { static_cast<int> (rtc::PeerConnection::State::New) };
     std::atomic<int> iceState { static_cast<int> (rtc::PeerConnection::IceState::New) };
 };
@@ -171,9 +278,11 @@ WebRtcAudioSender::WebRtcAudioSender()
       {
           if (encoderToDestroy != nullptr)
               opus_encoder_destroy(encoderToDestroy);
-      })
+    })
 {
     opusPacket.resize(4096);
+    pcmPending.resize(defaultPcmPacketFrames * pcmChannels);
+    pcmPacket.resize(pcmHeaderBytes + defaultPcmPacketFrames * pcmChannels * 4);
 }
 
 WebRtcAudioSender::~WebRtcAudioSender()
@@ -184,7 +293,26 @@ WebRtcAudioSender::~WebRtcAudioSender()
 void WebRtcAudioSender::applyConfig(const StreamConfig& newConfig)
 {
     std::lock_guard<std::mutex> lock(mutex);
+    const auto previousTransportMode = config.transportMode;
+    const auto previousLatencyMode = config.latencyMode;
+    const auto previousPcmFrames = config.pcmPacketFrameCount();
+    const auto previousPcmCodecId = config.pcmCodecId();
     config = newConfig;
+    const auto pcmFrames = static_cast<size_t> (config.pcmPacketFrameCount());
+    if (pcmPending.size() < pcmFrames * pcmChannels)
+        pcmPending.resize(pcmFrames * pcmChannels);
+    if (pcmPacket.size() < pcmHeaderBytes + pcmFrames * pcmChannels * 4)
+        pcmPacket.resize(pcmHeaderBytes + pcmFrames * pcmChannels * 4);
+    if (previousPcmFrames != config.pcmPacketFrameCount()
+        || previousPcmCodecId != config.pcmCodecId()
+        || previousTransportMode != config.transportMode
+        || previousLatencyMode != config.latencyMode)
+    {
+        pcmPendingFrames = 0;
+        pcmSampleCursor = 0;
+        pcmSequence = 0;
+        pcmStreamId = pcmStreamId == std::numeric_limits<uint32_t>::max() ? 1u : pcmStreamId + 1u;
+    }
     configureEncoderIfNeeded();
 }
 
@@ -247,9 +375,32 @@ void WebRtcAudioSender::resetCountersLocked()
     rtpSendFailures.store(0, std::memory_order_relaxed);
     encodeOverBudgetCount.store(0, std::memory_order_relaxed);
     timestampAnomalyCount.store(0, std::memory_order_relaxed);
+    pcmOpenChannels.store(0, std::memory_order_relaxed);
+    pcmReceiverReadyCount.store(0, std::memory_order_relaxed);
+    pcmPacketsSent.store(0, std::memory_order_relaxed);
+    pcmBytesSent.store(0, std::memory_order_relaxed);
+    pcmSendCalls.store(0, std::memory_order_relaxed);
+    pcmSendFailures.store(0, std::memory_order_relaxed);
+    pcmDroppedBeforeSend.store(0, std::memory_order_relaxed);
+    pcmReceiverStatsCount.store(0, std::memory_order_relaxed);
     opusEncodeErrors.store(0, std::memory_order_relaxed);
     opusPacketBytesTotal.store(0, std::memory_order_relaxed);
     opusPacketBytesLast.store(0, std::memory_order_relaxed);
+    pcmPendingFrames = 0;
+    pcmSampleCursor = 0;
+    pcmSequence = 0;
+    pcmDiscontinuityPending = false;
+    pcmStreamId = pcmStreamId == std::numeric_limits<uint32_t>::max() ? 1u : pcmStreamId + 1u;
+    lastReceiverReadyAckMs = 0.0;
+    pcmReceiverBufferMs = 0.0;
+    pcmReceiverUnderflows = 0;
+    pcmReceiverOverflows = 0;
+    pcmReceiverMissingPackets = 0;
+    pcmReceiverLatePackets = 0;
+    pcmAudioContextSampleRate = 0.0;
+    pcmAudioContextBaseLatencyMs = -1.0;
+    pcmAudioContextOutputLatencyMs = -1.0;
+    pcmReceiverLastError.clear();
     haveLastSubmittedTimestamp = false;
     lastSubmittedTimestamp = 0;
     currentSequenceNumber = 0;
@@ -300,19 +451,25 @@ void WebRtcAudioSender::handleOffer(mg_connection* connection, const juce::var& 
         peerConfig = config;
         peerConfig.opusBitrateMode = parseBitrateMode(message, peerConfig.opusBitrateMode);
         peerConfig.latencyMode = parseLatencyMode(message, peerConfig.latencyMode);
+        peerConfig.selectedTransportMode = parseTransportMode(message, peerConfig.selectedTransportMode);
+        peerConfig.transportMode = StreamConfig::resolveTransportMode(peerConfig.selectedTransportMode,
+                                                                       peerConfig.useSelfSignedCertificate);
         config.opusBitrateMode = peerConfig.opusBitrateMode;
         config.latencyMode = peerConfig.latencyMode;
+        config.selectedTransportMode = peerConfig.selectedTransportMode;
+        config.transportMode = peerConfig.transportMode;
         configureEncoderIfNeeded();
     }
 
     try
     {
         auto rtcConfig = rtc::Configuration();
-        rtcConfig.forceMediaTransport = true;
+        rtcConfig.forceMediaTransport = ! peerConfig.usesPcmDataChannel();
         rtcConfig.enableIceTcp = false;
 
         auto peer = std::make_shared<Peer>();
         peer->connection = connection;
+        peer->transportMode = peerConfig.transportMode;
         peer->pc = std::make_shared<rtc::PeerConnection>(rtcConfig);
 
         std::weak_ptr<Peer> weakPeer = peer;
@@ -351,7 +508,11 @@ void WebRtcAudioSender::handleOffer(mg_connection* connection, const juce::var& 
                 if (state == rtc::PeerConnection::State::Disconnected
                     || state == rtc::PeerConnection::State::Failed
                     || state == rtc::PeerConnection::State::Closed)
+                {
                     locked->open.store(false, std::memory_order_release);
+                    locked->pcmOpen.store(false, std::memory_order_release);
+                    locked->pcmReceiverReady.store(false, std::memory_order_release);
+                }
             }
         });
 
@@ -361,36 +522,50 @@ void WebRtcAudioSender::handleOffer(mg_connection* connection, const juce::var& 
                 locked->iceState.store(static_cast<int> (state), std::memory_order_release);
         });
 
-        const auto offerAudio = parseOfferAudioInfo(sdp);
-        const auto ssrc = nextSsrc();
-        const auto cname = std::string("pgstream-audio");
-        auto audio = rtc::Description::Audio(toStdString(offerAudio.mid), rtc::Description::Direction::SendOnly);
-        audio.addOpusCodec(offerAudio.opusPayloadType, opusFmtp(peerConfig));
-        const auto ptime = std::to_string(peerConfig.opusFrameDurationMs());
-        audio.addAttribute("ptime:" + ptime);
-        audio.addAttribute("maxptime:" + ptime);
-        audio.addSSRC(ssrc, cname, "pgstream", "pgstream-audio");
+        OfferAudioInfo offerAudio;
+        uint32_t ssrc = 0;
 
-        peer->track = peer->pc->addTrack(audio);
-        peer->rtpConfig = std::make_shared<rtc::RtpPacketizationConfig>(
-            ssrc, cname, static_cast<uint8_t> (offerAudio.opusPayloadType), rtc::OpusRtpPacketizer::DefaultClockRate);
+        if (peerConfig.usesPcmDataChannel())
+        {
+            peer->pc->onDataChannel([this, weakPeer] (std::shared_ptr<rtc::DataChannel> dataChannel)
+            {
+                if (auto locked = weakPeer.lock())
+                    configureDataChannel(locked, std::move(dataChannel));
+            });
+        }
+        else
+        {
+            offerAudio = parseOfferAudioInfo(sdp);
+            ssrc = nextSsrc();
+            const auto cname = std::string("pgstream-audio");
+            auto audio = rtc::Description::Audio(toStdString(offerAudio.mid), rtc::Description::Direction::SendOnly);
+            audio.addOpusCodec(offerAudio.opusPayloadType, opusFmtp(peerConfig));
+            const auto ptime = std::to_string(peerConfig.opusFrameDurationMs());
+            audio.addAttribute("ptime:" + ptime);
+            audio.addAttribute("maxptime:" + ptime);
+            audio.addSSRC(ssrc, cname, "pgstream", "pgstream-audio");
 
-        auto packetizer = std::make_shared<rtc::OpusRtpPacketizer>(peer->rtpConfig);
-        auto srReporter = std::make_shared<rtc::RtcpSrReporter>(peer->rtpConfig);
-        packetizer->addToChain(srReporter);
-        auto nackResponder = std::make_shared<rtc::RtcpNackResponder>();
-        packetizer->addToChain(nackResponder);
-        peer->track->setMediaHandler(packetizer);
-        peer->track->onOpen([weakPeer]
-        {
-            if (auto locked = weakPeer.lock())
-                locked->open.store(true, std::memory_order_release);
-        });
-        peer->track->onClosed([weakPeer]
-        {
-            if (auto locked = weakPeer.lock())
-                locked->open.store(false, std::memory_order_release);
-        });
+            peer->track = peer->pc->addTrack(audio);
+            peer->rtpConfig = std::make_shared<rtc::RtpPacketizationConfig>(
+                ssrc, cname, static_cast<uint8_t> (offerAudio.opusPayloadType), rtc::OpusRtpPacketizer::DefaultClockRate);
+
+            auto packetizer = std::make_shared<rtc::OpusRtpPacketizer>(peer->rtpConfig);
+            auto srReporter = std::make_shared<rtc::RtcpSrReporter>(peer->rtpConfig);
+            packetizer->addToChain(srReporter);
+            auto nackResponder = std::make_shared<rtc::RtcpNackResponder>();
+            packetizer->addToChain(nackResponder);
+            peer->track->setMediaHandler(packetizer);
+            peer->track->onOpen([weakPeer]
+            {
+                if (auto locked = weakPeer.lock())
+                    locked->open.store(true, std::memory_order_release);
+            });
+            peer->track->onClosed([weakPeer]
+            {
+                if (auto locked = weakPeer.lock())
+                    locked->open.store(false, std::memory_order_release);
+            });
+        }
 
         PeerPtr oldPeer;
         {
@@ -406,11 +581,18 @@ void WebRtcAudioSender::handleOffer(mg_connection* connection, const juce::var& 
                 resetCountersLocked();
 
             peers[connection] = peer;
-            negotiatedPayloadType = offerAudio.opusPayloadType;
-            currentSsrc = ssrc;
-            currentSequenceNumber = peer->rtpConfig->sequenceNumber;
-            currentTimestamp = peer->rtpConfig->timestamp;
-            currentTimestampIncrementExpected = static_cast<uint32_t> (encoderFrameFrames);
+            if (peerConfig.usesPcmDataChannel())
+            {
+                pcmPendingFrames = 0;
+            }
+            else
+            {
+                negotiatedPayloadType = offerAudio.opusPayloadType;
+                currentSsrc = ssrc;
+                currentSequenceNumber = peer->rtpConfig->sequenceNumber;
+                currentTimestamp = peer->rtpConfig->timestamp;
+                currentTimestampIncrementExpected = static_cast<uint32_t> (encoderFrameFrames);
+            }
             haveLastSubmittedTimestamp = false;
         }
 
@@ -448,6 +630,105 @@ void WebRtcAudioSender::handleRemoteCandidate(mg_connection* connection, const j
     {
         sendJson(connection, "{\"type\":\"webrtc-error\",\"message\":\"failed to add ICE candidate\"}");
     }
+}
+
+void WebRtcAudioSender::configureDataChannel(PeerPtr peer, std::shared_ptr<rtc::DataChannel> dataChannel)
+{
+    if (peer == nullptr || dataChannel == nullptr)
+        return;
+
+    const auto label = juce::String(dataChannel->label());
+    if (label.isNotEmpty() && label != "pgs-pcm-audio")
+        return;
+
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        peer->dataChannel = dataChannel;
+    }
+
+    std::weak_ptr<Peer> weakPeer = peer;
+    dataChannel->onOpen([weakPeer]
+    {
+        if (auto locked = weakPeer.lock())
+        {
+            locked->pcmOpen.store(true, std::memory_order_release);
+            locked->open.store(true, std::memory_order_release);
+        }
+    });
+
+    dataChannel->onClosed([weakPeer]
+    {
+        if (auto locked = weakPeer.lock())
+        {
+            locked->pcmOpen.store(false, std::memory_order_release);
+            locked->pcmReceiverReady.store(false, std::memory_order_release);
+            locked->open.store(false, std::memory_order_release);
+        }
+    });
+
+    dataChannel->onError([weakPeer] (std::string)
+    {
+        if (auto locked = weakPeer.lock())
+        {
+            locked->pcmOpen.store(false, std::memory_order_release);
+            locked->pcmReceiverReady.store(false, std::memory_order_release);
+            locked->open.store(false, std::memory_order_release);
+        }
+    });
+
+    dataChannel->onMessage([weakPeer] (rtc::message_variant data)
+    {
+        if (auto locked = weakPeer.lock())
+        {
+            if (std::holds_alternative<std::string>(data)
+                && juce::String(std::get<std::string>(data)).containsIgnoreCase("ready"))
+                locked->pcmReceiverReady.store(true, std::memory_order_release);
+        }
+    });
+}
+
+void WebRtcAudioSender::updateReceiverStats(mg_connection* connection, const juce::var& message)
+{
+    const auto engine = propertyString(message, "currentEngine").toLowerCase();
+    const auto ready = propertyBool(message, "dataChannelOpen", false)
+        && propertyString(message, "audioContextState").toLowerCase() == "running"
+        && propertyBool(message, "audioWorkletAvailable", false)
+        && propertyBool(message, "audioWorkletModuleLoaded", false)
+        && propertyBool(message, "audioWorkletNodeCreated", false)
+        && propertyBool(message, "audioWorkletProcessorReady", false)
+        && propertyBool(message, "ringBufferReady", false)
+        && propertyBool(message, "secureContextOk", false)
+        && engine.contains("pcm");
+
+    std::lock_guard<std::mutex> lock(mutex);
+    const auto it = peers.find(connection);
+    if (it == peers.end() || it->second == nullptr)
+        return;
+
+    auto& peer = it->second;
+    const auto wasReady = peer->pcmReceiverReady.load(std::memory_order_acquire);
+    peer->pcmReceiverReady.store(ready, std::memory_order_release);
+
+    if (ready && ! wasReady)
+    {
+        pcmPendingFrames = 0;
+        pcmSampleCursor = 0;
+        pcmSequence = 0;
+        pcmDiscontinuityPending = false;
+        pcmStreamId = pcmStreamId == std::numeric_limits<uint32_t>::max() ? 1u : pcmStreamId + 1u;
+    }
+
+    lastReceiverReadyAckMs = juce::Time::getMillisecondCounterHiRes();
+    pcmReceiverBufferMs = propertyDouble(message, "bufferMs", pcmReceiverBufferMs);
+    pcmReceiverUnderflows = static_cast<uint64_t> (juce::jmax(0, propertyInt(message, "underflows", static_cast<int> (pcmReceiverUnderflows))));
+    pcmReceiverOverflows = static_cast<uint64_t> (juce::jmax(0, propertyInt(message, "overflows", static_cast<int> (pcmReceiverOverflows))));
+    pcmReceiverMissingPackets = static_cast<uint64_t> (juce::jmax(0, propertyInt(message, "missingPackets", static_cast<int> (pcmReceiverMissingPackets))));
+    pcmReceiverLatePackets = static_cast<uint64_t> (juce::jmax(0, propertyInt(message, "latePackets", static_cast<int> (pcmReceiverLatePackets))));
+    pcmAudioContextSampleRate = propertyDouble(message, "audioContextSampleRate", pcmAudioContextSampleRate);
+    pcmAudioContextBaseLatencyMs = propertyDouble(message, "audioContextBaseLatencyMs", pcmAudioContextBaseLatencyMs);
+    pcmAudioContextOutputLatencyMs = propertyDouble(message, "audioContextOutputLatencyMs", pcmAudioContextOutputLatencyMs);
+    pcmReceiverLastError = propertyString(message, "lastError");
+    pcmReceiverStatsCount.fetch_add(1, std::memory_order_relaxed);
 }
 
 void WebRtcAudioSender::removeConnection(mg_connection* connection)
@@ -497,9 +778,14 @@ void WebRtcAudioSender::closePeer(PeerPtr peer)
         return;
 
     peer->open.store(false, std::memory_order_release);
+    peer->pcmOpen.store(false, std::memory_order_release);
+    peer->pcmReceiverReady.store(false, std::memory_order_release);
 
     if (peer->track != nullptr)
         peer->track->close();
+
+    if (peer->dataChannel != nullptr)
+        peer->dataChannel->close();
 
     if (peer->pc != nullptr)
     {
@@ -521,6 +807,47 @@ void WebRtcAudioSender::encodeAndSend(const float* interleavedStereo48k, size_t 
         return;
 
     std::lock_guard<std::mutex> lock(mutex);
+
+    if (config.usesPcmDataChannel())
+    {
+        const auto packetFrames = static_cast<size_t> (config.pcmPacketFrameCount());
+        if (pcmPending.size() < packetFrames * pcmChannels)
+            pcmPending.resize(packetFrames * pcmChannels);
+        if (pcmPacket.size() < pcmHeaderBytes + packetFrames * pcmChannels * 4)
+            pcmPacket.resize(pcmHeaderBytes + packetFrames * pcmChannels * 4);
+
+        const auto anyOpen = std::any_of(peers.begin(), peers.end(), [] (const auto& entry)
+        {
+            return entry.second != nullptr
+                && entry.second->pcmOpen.load(std::memory_order_acquire);
+        });
+
+        if (! anyOpen)
+        {
+            pcmPendingFrames = 0;
+            return;
+        }
+
+        size_t sourceFrame = 0;
+        while (sourceFrame < frameCount)
+        {
+            const auto writable = std::min(packetFrames - pcmPendingFrames, frameCount - sourceFrame);
+            std::copy(interleavedStereo48k + sourceFrame * pcmChannels,
+                      interleavedStereo48k + (sourceFrame + writable) * pcmChannels,
+                      pcmPending.data() + pcmPendingFrames * pcmChannels);
+
+            pcmPendingFrames += writable;
+            sourceFrame += writable;
+
+            if (pcmPendingFrames < packetFrames)
+                continue;
+
+            sendPcmFrameLocked(pcmPending.data(), packetFrames);
+            pcmPendingFrames = 0;
+        }
+
+        return;
+    }
 
     const auto anyOpen = std::any_of(peers.begin(), peers.end(), [] (const auto& entry)
     {
@@ -660,11 +987,152 @@ WebRtcAudioSender::SendResult WebRtcAudioSender::sendEncodedFrameLocked(const ui
     return result;
 }
 
+WebRtcAudioSender::SendResult WebRtcAudioSender::sendPcmFrameLocked(const float* interleavedStereo48k, size_t frameCount)
+{
+    SendResult result;
+
+    if (interleavedStereo48k == nullptr || frameCount == 0)
+        return result;
+
+    const auto codecId = config.pcmCodecId();
+    const auto bytesPerSample = codecId == 1 ? size_t { 2 } : (codecId == 2 ? size_t { 3 } : size_t { 4 });
+    const auto payloadBytes = frameCount * pcmChannels * bytesPerSample;
+    pcmPacket.assign(pcmHeaderBytes + payloadBytes, 0);
+    pcmPacket[0] = 'P';
+    pcmPacket[1] = 'G';
+    pcmPacket[2] = 'P';
+    pcmPacket[3] = 'C';
+    pcmPacket[4] = 1;
+    pcmPacket[5] = static_cast<uint8_t> (codecId);
+    pcmPacket[6] = static_cast<uint8_t> (pcmChannels);
+    pcmPacket[7] = static_cast<uint8_t> (pcmHeaderBytes);
+    writeU32Le(pcmPacket, 8, opusSampleRate);
+    writeU32Le(pcmPacket, 12, static_cast<uint32_t> (pcmSequence & 0xffffffffu));
+    writeU32Le(pcmPacket, 16, static_cast<uint32_t> (pcmSampleCursor & 0xffffffffu));
+    writeU32Le(pcmPacket, 20, static_cast<uint32_t> ((pcmSampleCursor >> 32u) & 0xffffffffu));
+    writeU32Le(pcmPacket, 24, static_cast<uint32_t> (frameCount));
+    writeU32Le(pcmPacket, 28, static_cast<uint32_t> (payloadBytes));
+    writeU32Le(pcmPacket, 32, pcmStreamId);
+
+    double sumSquaresL = 0.0;
+    double sumSquaresR = 0.0;
+    auto flags = uint32_t { 0 };
+    if (pcmSequence == 0)
+        flags |= pcmFlagFirstPacket | pcmFlagFormatChanged;
+    if (pcmDiscontinuityPending)
+        flags |= pcmFlagSenderDroppedOldAudio | pcmFlagDiscontinuity;
+    auto offset = pcmHeaderBytes;
+    for (size_t i = 0; i < frameCount; ++i)
+    {
+        const auto left = interleavedStereo48k[i * pcmChannels];
+        const auto right = interleavedStereo48k[i * pcmChannels + 1];
+        sumSquaresL += static_cast<double> (left) * static_cast<double> (left);
+        sumSquaresR += static_cast<double> (right) * static_cast<double> (right);
+
+        if (codecId != 3 && (isClippedForIntegerPcm(left) || isClippedForIntegerPcm(right)))
+            flags |= pcmFlagClippingDetected;
+
+        if (codecId == 1)
+        {
+            const auto left16 = static_cast<uint16_t> (floatToPcm16(left));
+            const auto right16 = static_cast<uint16_t> (floatToPcm16(right));
+            writeU16Le(pcmPacket, offset, left16);
+            offset += 2;
+            writeU16Le(pcmPacket, offset, right16);
+            offset += 2;
+        }
+        else if (codecId == 2)
+        {
+            const auto left24 = static_cast<uint32_t> (floatToPcm24(left));
+            const auto right24 = static_cast<uint32_t> (floatToPcm24(right));
+            pcmPacket[offset++] = static_cast<uint8_t> (left24 & 0xffu);
+            pcmPacket[offset++] = static_cast<uint8_t> ((left24 >> 8u) & 0xffu);
+            pcmPacket[offset++] = static_cast<uint8_t> ((left24 >> 16u) & 0xffu);
+            pcmPacket[offset++] = static_cast<uint8_t> (right24 & 0xffu);
+            pcmPacket[offset++] = static_cast<uint8_t> ((right24 >> 8u) & 0xffu);
+            pcmPacket[offset++] = static_cast<uint8_t> ((right24 >> 16u) & 0xffu);
+        }
+        else
+        {
+            writeU32Le(pcmPacket, offset, float32ToBits(left));
+            offset += 4;
+            writeU32Le(pcmPacket, offset, float32ToBits(right));
+            offset += 4;
+        }
+    }
+
+    inputRmsL = std::sqrt(sumSquaresL / static_cast<double> (frameCount));
+    inputRmsR = std::sqrt(sumSquaresR / static_cast<double> (frameCount));
+    writeU32Le(pcmPacket, 36, flags);
+
+    auto droppedForBackpressure = false;
+
+    for (const auto& entry : peers)
+    {
+        const auto& peer = entry.second;
+        if (peer == nullptr
+            || peer->dataChannel == nullptr
+            || ! peer->pcmOpen.load(std::memory_order_acquire))
+            continue;
+
+        if (! peer->pcmReceiverReady.load(std::memory_order_acquire))
+            continue;
+
+        ++result.attempted;
+        try
+        {
+            const auto buffered = peer->dataChannel->bufferedAmount();
+            juce::ignoreUnused(pcmBackpressureWarningBytes, pcmBackpressurePanicBytes);
+            if (buffered >= pcmBackpressureDangerBytes)
+            {
+                droppedForBackpressure = true;
+                ++result.failed;
+                continue;
+            }
+
+            peer->dataChannel->send(reinterpret_cast<const rtc::byte*> (pcmPacket.data()), pcmPacket.size());
+            ++result.sent;
+        }
+        catch (...)
+        {
+            peer->pcmOpen.store(false, std::memory_order_release);
+            peer->open.store(false, std::memory_order_release);
+            ++result.failed;
+        }
+    }
+
+    if (result.sent > 0)
+    {
+        pcmSendCalls.fetch_add(result.sent, std::memory_order_relaxed);
+        pcmPacketsSent.fetch_add(result.sent, std::memory_order_relaxed);
+        pcmBytesSent.fetch_add(static_cast<uint64_t> (pcmPacket.size() * result.sent), std::memory_order_relaxed);
+        pcmSampleCursor += frameCount;
+        ++pcmSequence;
+        pcmDiscontinuityPending = false;
+    }
+
+    if (droppedForBackpressure)
+    {
+        pcmDroppedBeforeSend.fetch_add(1, std::memory_order_relaxed);
+        pcmPendingFrames = 0;
+        pcmDiscontinuityPending = true;
+    }
+
+    if (result.failed > 0)
+        pcmSendFailures.fetch_add(result.failed, std::memory_order_relaxed);
+
+    return result;
+}
+
 void WebRtcAudioSender::resetAudio()
 {
     std::lock_guard<std::mutex> lock(mutex);
     pendingFrames = 0;
+    pcmPendingFrames = 0;
     encodedSampleCursor = 0;
+    pcmSampleCursor = 0;
+    pcmSequence = 0;
+    pcmDiscontinuityPending = false;
     haveLastSubmittedTimestamp = false;
     currentTimestampIncrementActual = 0;
 }
@@ -684,15 +1152,40 @@ int WebRtcAudioSender::openTrackCount() const
     }));
 }
 
+int WebRtcAudioSender::openOutputCount() const
+{
+    std::lock_guard<std::mutex> lock(mutex);
+    if (config.usesPcmDataChannel())
+    {
+        return static_cast<int> (std::count_if(peers.begin(), peers.end(), [] (const auto& entry)
+        {
+            return entry.second != nullptr
+                && entry.second->pcmOpen.load(std::memory_order_acquire);
+        }));
+    }
+
+    return static_cast<int> (std::count_if(peers.begin(), peers.end(), [] (const auto& entry)
+    {
+        return entry.second != nullptr
+            && entry.second->open.load(std::memory_order_acquire);
+    }));
+}
+
 bool WebRtcAudioSender::hasOpenTrack() const
 {
-    return openTrackCount() > 0;
+    return openOutputCount() > 0;
 }
 
 size_t WebRtcAudioSender::opusFrameCount() const
 {
     std::lock_guard<std::mutex> lock(mutex);
     return encoderFrameFrames;
+}
+
+size_t WebRtcAudioSender::audioFrameCount() const
+{
+    std::lock_guard<std::mutex> lock(mutex);
+    return config.usesPcmDataChannel() ? static_cast<size_t> (config.pcmPacketFrameCount()) : encoderFrameFrames;
 }
 
 void WebRtcAudioSender::fillStats(StreamStats& stats) const
@@ -710,6 +1203,12 @@ void WebRtcAudioSender::fillStats(StreamStats& stats) const
     stats.webrtcPacketsSubmittedToTrack = stats.webrtcRtpPacketsSent;
     stats.webrtcBytesSubmittedToTrack = encodedBytes.load(std::memory_order_relaxed);
     stats.webrtcSubmitErrors = stats.webrtcRtpSendFailures;
+    stats.pcmPacketsSent = pcmPacketsSent.load(std::memory_order_relaxed);
+    stats.pcmBytesSent = pcmBytesSent.load(std::memory_order_relaxed);
+    stats.pcmSendCalls = pcmSendCalls.load(std::memory_order_relaxed);
+    stats.pcmSendFailures = pcmSendFailures.load(std::memory_order_relaxed);
+    stats.pcmDroppedBeforeSend = pcmDroppedBeforeSend.load(std::memory_order_relaxed);
+    stats.pcmReceiverStatsCount = pcmReceiverStatsCount.load(std::memory_order_relaxed);
     stats.opusEncodeErrors = opusEncodeErrors.load(std::memory_order_relaxed);
     stats.opusPacketBytesLast = opusPacketBytesLast.load(std::memory_order_relaxed);
     const auto packetCount = encodedPackets.load(std::memory_order_relaxed);
@@ -727,11 +1226,49 @@ void WebRtcAudioSender::fillStats(StreamStats& stats) const
         stats.latencyTarget = config.latencyTargetDescription();
         stats.opusFrameDurationMs = config.opusFrameDurationMs();
         stats.transportMode = config.transportModeName();
+        stats.selectedTransportMode = config.selectedTransportModeName();
+        stats.httpsEnabled = config.usesHttps();
+        stats.selfSignedCertificateEnabled = config.useSelfSignedCertificate;
+        stats.audioPassthrough = config.audioPassthrough;
+        stats.serverScheme = config.serverScheme();
+        stats.pcmBitsPerSample = config.usesPcmDataChannel() ? config.pcmBitsPerSample() : 0;
+        stats.pcmPacketFrames = config.pcmPacketFrameCount();
+        stats.pcmTargetBufferMs = config.pcmTargetBufferMs();
         stats.webrtcPeerCount = static_cast<int> (peers.size());
         stats.webrtcOpenTracks = static_cast<int> (std::count_if(peers.begin(), peers.end(), [] (const auto& entry)
         {
             return entry.second != nullptr && entry.second->open.load(std::memory_order_acquire);
         }));
+        stats.pcmOpenChannels = static_cast<int> (std::count_if(peers.begin(), peers.end(), [] (const auto& entry)
+        {
+            return entry.second != nullptr && entry.second->pcmOpen.load(std::memory_order_acquire);
+        }));
+        uint64_t maxBufferedAmount = 0;
+        for (const auto& entry : peers)
+        {
+            if (entry.second != nullptr && entry.second->dataChannel != nullptr)
+                maxBufferedAmount = std::max<uint64_t>(maxBufferedAmount,
+                                                       static_cast<uint64_t> (entry.second->dataChannel->bufferedAmount()));
+        }
+        stats.pcmDataChannelBufferedBytes = maxBufferedAmount;
+        stats.pcmReceiverReadyCount = static_cast<int> (std::count_if(peers.begin(), peers.end(), [] (const auto& entry)
+        {
+            return entry.second != nullptr && entry.second->pcmReceiverReady.load(std::memory_order_acquire);
+        }));
+        stats.pcmSequenceCurrent = pcmSequence;
+        stats.pcmSampleCursor = pcmSampleCursor;
+        stats.pcmReceiverBufferMs = pcmReceiverBufferMs;
+        stats.pcmReceiverAckAgeMs = lastReceiverReadyAckMs > 0.0
+            ? juce::Time::getMillisecondCounterHiRes() - lastReceiverReadyAckMs
+            : -1.0;
+        stats.pcmReceiverUnderflows = pcmReceiverUnderflows;
+        stats.pcmReceiverOverflows = pcmReceiverOverflows;
+        stats.pcmReceiverMissingPackets = pcmReceiverMissingPackets;
+        stats.pcmReceiverLatePackets = pcmReceiverLatePackets;
+        stats.pcmAudioContextSampleRate = pcmAudioContextSampleRate;
+        stats.pcmAudioContextBaseLatencyMs = pcmAudioContextBaseLatencyMs;
+        stats.pcmAudioContextOutputLatencyMs = pcmAudioContextOutputLatencyMs;
+        stats.pcmReceiverLastError = pcmReceiverLastError;
         stats.webrtcNegotiatedPayloadType = negotiatedPayloadType;
         stats.webrtcActualPayloadType = negotiatedPayloadType;
         stats.webrtcSsrc = currentSsrc;

@@ -14,6 +14,7 @@ struct OpusEncoder;
 
 namespace rtc
 {
+class DataChannel;
 class PeerConnection;
 class Track;
 }
@@ -29,6 +30,7 @@ public:
     void applyConfig(const StreamConfig& newConfig);
     void handleOffer(mg_connection* connection, const juce::var& message);
     void handleRemoteCandidate(mg_connection* connection, const juce::var& message);
+    void updateReceiverStats(mg_connection* connection, const juce::var& message);
     void removeConnection(mg_connection* connection);
     void clear();
 
@@ -37,8 +39,10 @@ public:
 
     int peerCount() const;
     int openTrackCount() const;
+    int openOutputCount() const;
     bool hasOpenTrack() const;
     size_t opusFrameCount() const;
+    size_t audioFrameCount() const;
 
     void fillStats(StreamStats& stats) const;
 
@@ -59,6 +63,8 @@ private:
     void resetEncoderComplexityLocked();
     void fallbackEncoderComplexityLocked();
     SendResult sendEncodedFrameLocked(const uint8_t* data, size_t bytes, uint64_t frameStartSample);
+    SendResult sendPcmFrameLocked(const float* interleavedStereo48k, size_t frameCount);
+    void configureDataChannel(PeerPtr peer, std::shared_ptr<rtc::DataChannel> dataChannel);
     void sendJson(mg_connection* connection, const juce::String& json) const;
     void closePeer(PeerPtr peer);
     PeerPtr findPeer(mg_connection* connection) const;
@@ -77,8 +83,25 @@ private:
     size_t encoderFrameFrames = 960;
     std::vector<float> pendingPcm;
     size_t pendingFrames = 0;
+    std::vector<float> pcmPending;
+    size_t pcmPendingFrames = 0;
+    std::vector<uint8_t> pcmPacket;
     std::vector<uint8_t> opusPacket;
     uint64_t encodedSampleCursor = 0;
+    uint64_t pcmSampleCursor = 0;
+    uint64_t pcmSequence = 0;
+    uint32_t pcmStreamId = 1;
+    bool pcmDiscontinuityPending = false;
+    double lastReceiverReadyAckMs = 0.0;
+    double pcmReceiverBufferMs = 0.0;
+    uint64_t pcmReceiverUnderflows = 0;
+    uint64_t pcmReceiverOverflows = 0;
+    uint64_t pcmReceiverMissingPackets = 0;
+    uint64_t pcmReceiverLatePackets = 0;
+    double pcmAudioContextSampleRate = 0.0;
+    double pcmAudioContextBaseLatencyMs = -1.0;
+    double pcmAudioContextOutputLatencyMs = -1.0;
+    juce::String pcmReceiverLastError;
     bool haveLastSubmittedTimestamp = false;
     uint32_t lastSubmittedTimestamp = 0;
     uint16_t currentSequenceNumber = 0;
@@ -99,6 +122,14 @@ private:
     std::atomic<uint64_t> rtpSendFailures { 0 };
     std::atomic<uint64_t> encodeOverBudgetCount { 0 };
     std::atomic<uint64_t> timestampAnomalyCount { 0 };
+    std::atomic<int> pcmOpenChannels { 0 };
+    std::atomic<int> pcmReceiverReadyCount { 0 };
+    std::atomic<uint64_t> pcmPacketsSent { 0 };
+    std::atomic<uint64_t> pcmBytesSent { 0 };
+    std::atomic<uint64_t> pcmSendCalls { 0 };
+    std::atomic<uint64_t> pcmSendFailures { 0 };
+    std::atomic<uint64_t> pcmDroppedBeforeSend { 0 };
+    std::atomic<uint64_t> pcmReceiverStatsCount { 0 };
     std::atomic<uint64_t> opusEncodeErrors { 0 };
     std::atomic<uint64_t> opusPacketBytesTotal { 0 };
     std::atomic<int> opusPacketBytesLast { 0 };

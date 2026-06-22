@@ -2,9 +2,9 @@
 
 PGStream is a Windows x64 VST3 audio effect for transparent stereo master-bus tapping. The DAW audio path is passed through 1:1; the plugin only copies the first stereo pair into a preallocated FIFO and streams that copy to a LAN browser.
 
-The browser stream uses lossy Opus. It is designed for perceptually transparent monitoring and broadcast-quality LAN listening with no added effects, browser enhancement, or unintended gain changes; it is not a bit-perfect archival transport.
+The browser stream supports lossy Opus monitoring and lossless PCM16/PCM24/PCM32F monitoring modes. Opus is designed for perceptually transparent LAN listening; PCM modes use WebRTC DataChannel transport and browser AudioWorklet playback. PCM32F transports Float32 stereo samples without integer quantization inside the transport layer.
 
-The embedded server is disabled by default for DAW scan safety. Enabling the stream starts a plain HTTP/WS CivetWeb server inside the plugin. The browser page is embedded HTML/CSS/JS. Audio transport is WebRTC Opus over libdatachannel with Mbed TLS for DTLS/SRTP; WebSocket is used only for WebRTC signaling.
+The embedded server is disabled by default for DAW scan safety. Enabling the stream starts a CivetWeb server inside the plugin. Self-signed HTTPS is enabled by default for browser secure-context APIs; disabling it falls back to HTTP/WS and forces Opus. WebSocket/WSS is used only for signaling/control, not PCM audio.
 
 ## Build
 
@@ -49,10 +49,10 @@ Point the DAW scanner at the parent VST3 folder, not at `PGStream.vst3\Contents`
 Insert PGStream at the end of a master bus, enable streaming, then open the shown LAN URL, for example:
 
 ```text
-http://<LAN-IP>:8123/
+https://<LAN-IP>:8123/
 ```
 
-The browser page is served over plain LAN HTTP and uses a plain WS connection for SDP/ICE signaling. Use it only on a trusted local network.
+The browser page uses WSS for SDP/ICE signaling when served over HTTPS and WS when served over HTTP. The certificate is self-signed and generated locally with SANs for localhost, pigeonstream.local, 127.0.0.1, and the selected LAN IP.
 
 The browser **Connect / Play** control toggles to **Stop** after playback setup begins. Stop closes the active WebRTC peer and allows another start in the same page session without a reload.
 
@@ -60,17 +60,25 @@ PGStream encodes stereo 48 kHz Opus frames on the network worker thread and send
 
 Opus is configured for continuous stereo music/audio at the selected bitrate with DTX and in-band FEC disabled for LAN mode. Encoder complexity starts at 8 and can fall back internally to 6 only after the encode over-budget counter increases.
 
+PCM16, PCM24, and PCM32F modes use a browser-owned WebRTC DataChannel named `pgs-pcm-audio` with unordered, max-retransmits-0 delivery. PCM packets use the `PGPC` 40-byte binary header, fixed 10 ms / 480-frame packets, 48 kHz stereo little-endian payloads, browser validation, a single browser playback ring buffer, and AudioWorklet output. PCM16 is about 1536 kb/s payload bitrate, PCM24 is about 2304 kb/s, and PCM32F is about 3072 kb/s. No PCM audio is sent over WebSocket/WSS.
+
 The worker reads from the audio FIFO in roughly one Opus-frame chunk at a time. If the DAW session is not 48 kHz, resampling to 48 kHz happens only on the non-realtime network worker. The local DAW pass-through path is never resampled.
 
 The browser and DAW do not share a hardware audio clock. PGStream relies on WebRTC's browser jitter buffer for Opus/RTP playout. When the DAW is idle and keep-alive is enabled, PGStream sends Opus silence frames so the WebRTC media path stays warm.
 
 The project image `assets/pgs.png` is embedded in the plugin binary and shown in both the plugin editor and browser UI. The plugin editor renders a QR code for the selected primary LAN URL after the stream is enabled.
 
-The plugin editor About panel opens from the small `i` button and closes with its `X` button. It displays the embedded `assets/logo.png` image, plugin name, version 0.7, author, description, copyright, project link, and AGPL license note.
+The plugin editor About panel opens from the small `i` button and closes with its `X` button. It displays the embedded `assets/logo.png` image, plugin name, version 0.8, author, description, copyright, project link, and AGPL license note.
+
+The small `S` button opens Settings. In v0.8 Settings contains the self-signed HTTPS toggle. When self-signed HTTPS is off, PGStream serves the receiver over HTTP/WS, forces Engine to Opus, disables PCM choices in the browser, and shows the lossless-PCM HTTPS requirement in the UI.
+
+The plugin port control is a numeric input, not a slider. It accepts ports from 1024 to 65535. PCM16, PCM24, and PCM32F show fixed read-only format/bitrate text instead of Opus bitrate choices: PCM16 48 kHz stereo is about 1536 kb/s, PCM24 is about 2304 kb/s, and PCM32F is about 3072 kb/s.
+
+The browser normal view is intentionally compact: Connect / Play, Engine, Bitrate or PCM format, Latency Mode, Auto priority, Auto Negotiate, and Stats. Browser audio controls are hidden; Opus still uses an internal hidden audio element, while PCM uses AudioWorklet output. PCM creates an AudioContext with `latencyHint: "interactive"` and `sampleRate: 48000`; the actual sample rate, base latency, and output latency are shown in Stats. If the browser does not open a 48 kHz AudioContext, PCM is rejected instead of pretending to be sample-accurate.
 
 ## Browser Auto Negotiation
 
-The browser page can automatically test the existing **Opus Bitrate** and **Latency Mode** controls. It starts from 510 kb/s with Ultra Low latency, reconnects when a profile changes, waits until the peer connection is connected, the remote audio track is live, inbound audio stats exist, `packetsReceived` is increasing, and `packetsLost` is readable. It then waits for a 1 second warm-up and requires 3 continuous seconds with zero browser WebRTC packet loss delta.
+The browser page can run one-shot Auto Negotiation from the **Auto Negotiate** button. It tests explicit codec + latency candidates, reconnects when a candidate changes, waits until the peer connection is ready for the active engine, then waits for a 1 second warm-up and requires 2 continuous seconds with no receiver underruns, packet gaps, browser ring overflows, or sender dropped-before-send events. PCM readiness is based on DataChannel, AudioContext, AudioWorklet, and buffer state instead of remote media tracks/RTP counters.
 
 The decision input is only browser WebRTC `packetsLost` delta:
 
@@ -78,38 +86,45 @@ The decision input is only browser WebRTC `packetsLost` delta:
 packetLossDelta = current packetsLost - baseline packetsLost
 ```
 
-The baseline is captured after readiness and warm-up, separately for each tested peer/profile. A tested profile succeeds only when `packetLossDelta == 0` for the full 3 second evaluation window. Any `packetLossDelta > 0` after warm-up rejects that profile. Missing, undefined, or non-numeric packet-loss stats are treated as stats not ready; they do not reject a profile.
+The baseline is captured after readiness and warm-up, separately for each tested peer/profile. A tested profile succeeds only when `packetLossDelta == 0` for the full 2 second evaluation window. Any `packetLossDelta > 0` after warm-up rejects that profile. Missing, undefined, or non-numeric packet-loss stats are treated as stats not ready; they do not reject a profile.
 
-Modes choose the next existing profile as follows:
+Modes choose candidates as follows:
 
-- **Quality Priority**: increase Latency Mode first, lower bitrate only when latency is already at Safe.
-- **Latency Priority**: lower bitrate first, increase Latency Mode only when bitrate is already at the lowest setting.
-- **Balanced**: alternate one latency step safer, then one bitrate step lower.
+- **Quality Priority**: test PCM32F through all latency targets, then PCM24 through all targets, then PCM16, then Opus.
+- **Latency Priority**: test PCM32F, PCM24, PCM16, and Opus at one latency target before moving to the next higher target.
 
-If stats remain unavailable, Auto Negotiation stops with a diagnostic instead of degrading blindly. If every valid profile fails, PGStream uses the safest available runtime settings: 128 kb/s with Safe latency. Auto Negotiation updates the active native state, and the plugin and browser bitrate/latency comboboxes visibly follow the confirmed active value. Plugin FIFO underruns are displayed as diagnostics only; they never trigger Auto Negotiation profile changes and do not affect the final selected profile.
+If stats remain unavailable, Auto Negotiation stops with a diagnostic instead of degrading blindly. If every valid profile fails, PGStream falls back to Opus with Very Safe latency. Auto Negotiation updates the active native state, and the plugin and browser Engine, bitrate, latency, and Auto priority controls follow the confirmed active value when the server broadcasts state. Plugin FIFO underruns are displayed as diagnostics only; they never trigger Auto Negotiation profile changes and do not affect the final selected profile.
 
 ## Nerd Diagnostics
 
 The plugin editor and browser page each include a **Nerd** or **Stats** toggle. Diagnostics are collapsed by default.
 
-Plugin-side diagnostics show server and WebRTC sender metrics:
+Plugin-side diagnostics show a compact set of server and sender metrics:
 
-- **Server FIFO underruns**: source starvation after the worker waited for audio. Ordinary "not enough frames yet" polling is not counted as an underrun.
-- **WebRTC peers/open tracks**: current libdatachannel peers and open media tracks.
-- **WebRTC encoded packets**: Opus encoder output successfully emitted to at least one open track.
-- **RTP attempts/sent/failures**: send attempts to WebRTC tracks, successful sends, and exceptions from the media track.
-- **Encode over-budget count**: Opus frames whose encode time exceeded the worker budget; this is the only trigger for the internal complexity-6 fallback.
-- **State and media path**: active state revision/origin, last adaptation reason, negotiated payload type, SSRC, RTP sequence/timestamp, submitted track packets/bytes, Opus packet sizes, and input RMS.
-- **Current selected LAN IP**, bind/listen address, port, input sample rate, total submitted 48 kHz frames, FIFO fill, FIFO drops, and candidate LAN URLs.
+- **Common**: active engine, connection state, connected clients, selected profile, last state-change reason, receiver ACK age, FIFO fill, FIFO underruns/drops, and encode over-budget count.
+- **Opus**: RTP sent/failures and browser-side packet-loss/jitter direction.
+- **PCM**: DataChannel open/ready counts, queued bytes, dropped-before-send count, PCM packets/bytes/failures, stream packet size, receiver buffer/target, receiver ACK age, missing/late/overflow counts, AudioContext sample rate/latencies, and receiver underflows.
+- **LAN**: candidate LAN URLs are visible only in Nerd.
 
-Browser-side diagnostics show:
+Browser-side Stats show a compact set of receiver metrics:
 
-- **WebRTC connectionState/iceConnectionState**: browser peer connection state.
-- **Packets received/lost, jitter, RTT, concealed samples, jitter buffer delay**: browser WebRTC inbound audio stats.
-- **Remote track**: browser audio track state.
-- **Signaling socket**: the WS connection used only for WebRTC signaling.
-- **RTP attempts/sent/failures**: plugin-side sender counters mirrored from `/info`.
-- **Auto Negotiation**: active state, selected mode, tested profile, phase, baseline/current browser `packetsLost`, packet loss delta, stable zero-loss time, active encoder bitrate, active Opus frame duration, state revision/origin, profile changes, final runtime profile, last rejected profile, and FIFO underruns as a separate diagnostic.
+- **Common**: connection state, active engine, codec/format, actual throughput, RTT, and last fallback/reconnect reason.
+- **Security**: `location.protocol`, secure-context status, AudioWorklet availability, AudioContext sample rate/base latency/output latency, signaling scheme, receiver scheme, and certificate mode.
+- **Opus**: remote track, packets received/lost, jitter, concealed samples, and jitter-buffer values where the browser exposes them.
+- **PCM**: secure context, AudioWorklet state, DataChannel state, queued bytes, stream id, sample rate, packet duration, PCM buffer/target, packets, drops, missing/late packets, underflows, ACK age, and last PCM reason.
+- **Auto Negotiation**: active state, mode, tested profile, phase, stable zero-loss time, active bitrate, final profile, last failure, and FIFO underruns.
+
+## PCM Manual Acceptance Checks
+
+1. Enable streaming with self-signed HTTPS on, open the HTTPS LAN URL, select PCM16, and press **Connect / Play**. In browser Stats, verify DataChannel is open, AudioWorklet is ready, buffer rises above 0 ms, and no reconnect loop occurs because remote track/open RTP counters are zero.
+2. Repeat with PCM24 and PCM32F. Confirm the normal view shows the correct fixed PCM bitrate and browser Stats show PCM packets increasing.
+3. Select Opus. Confirm Opus still plays via WebRTC media/RTP and does not require the PCM DataChannel.
+4. Change Latency Mode and confirm PCM packet duration remains 10 ms / 480 frames while target buffer fill changes.
+5. Disable self-signed HTTPS in the plugin. Confirm the browser uses HTTP/WS, PCM options are disabled/forced to Opus, and Opus still works.
+6. Open plugin Settings with `S`, toggle self-signed HTTPS, and confirm the receiver restarts to the matching HTTP/HTTPS URL without a DAW restart.
+7. Edit the plugin Port field and confirm only ports 1024-65535 are accepted.
+8. Open browser Stats and confirm normal-view metrics are hidden until Stats is expanded.
+9. Run Auto Negotiation in Quality Priority and Latency Priority and confirm it stops after selecting a candidate.
 
 ## LAN IP Selection
 

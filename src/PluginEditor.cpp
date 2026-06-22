@@ -265,6 +265,19 @@ bool mask0(int x, int y)
     return ((x + y) & 1) == 0;
 }
 
+juce::String transportValueName(int index)
+{
+    if (index == 1)
+        return "PCM16 DataChannel";
+    if (index == 2)
+        return "PCM24 DataChannel";
+    if (index == 3)
+        return "PCM32F DataChannel";
+    if (index == 4)
+        return "Auto";
+    return "WebRTC Opus";
+}
+
 juce::Image makeQrImage(const juce::String& text)
 {
     if (text.isEmpty() || text.getNumBytesAsUTF8() > 53)
@@ -397,10 +410,10 @@ void AboutPanel::paint(juce::Graphics& g)
     g.setFont(juce::Font(14.0f));
     g.setColour(juce::Colour(0xffd8e0e6));
 
-    const juce::String copyright = "\xc2\xa9 2026 Aras Pigeon";
+    const juce::String copyright = juce::String::charToString(0x00a9) + " 2026 Aras Pigeon";
     const juce::String description = "Transparent VST3 for streaming audio from the DAW master bus, "
         "and other DAW buses if inserted there, to a browser over LAN.";
-    const juce::String text = juce::String("Version 0.7\n"
+    const juce::String text = juce::String("Version 0.8\n"
         "Author: Aras Pigeon\n\n"
     ) + description + "\n\n"
         + copyright + "\n"
@@ -427,19 +440,91 @@ bool AboutPanel::keyPressed(const juce::KeyPress& key)
     return false;
 }
 
+SettingsPanel::SettingsPanel()
+{
+    setWantsKeyboardFocus(true);
+
+    titleLabel.setText("Settings", juce::dontSendNotification);
+    titleLabel.setJustificationType(juce::Justification::centredLeft);
+    titleLabel.setColour(juce::Label::textColourId, juce::Colour(0xfff3f5f7));
+    titleLabel.setFont(juce::Font(18.0f, juce::Font::bold));
+    addAndMakeVisible(titleLabel);
+
+    helpLabel.setText("Turning this off serves the receiver over HTTP/WS and forces Opus.\nLossless PCM requires self-signed HTTPS.", juce::dontSendNotification);
+    helpLabel.setJustificationType(juce::Justification::topLeft);
+    helpLabel.setColour(juce::Label::textColourId, juce::Colour(0xffc7d0d8));
+    addAndMakeVisible(helpLabel);
+
+    addAndMakeVisible(httpsButton);
+    addAndMakeVisible(closeButton);
+
+    closeButton.onClick = [this]
+    {
+        if (onClose)
+            onClose();
+    };
+}
+
+void SettingsPanel::paint(juce::Graphics& g)
+{
+    g.setColour(juce::Colour(0xcc000000));
+    g.fillAll();
+
+    const auto panel = getLocalBounds().reduced(58, 72).toFloat();
+    g.setColour(juce::Colour(0xff20252a));
+    g.fillRoundedRectangle(panel, 8.0f);
+    g.setColour(juce::Colour(0xff46535d));
+    g.drawRoundedRectangle(panel, 8.0f, 1.0f);
+}
+
+void SettingsPanel::resized()
+{
+    auto panel = getLocalBounds().reduced(76, 92);
+    closeButton.setBounds(panel.getRight() - 30, panel.getY(), 26, 26);
+    titleLabel.setBounds(panel.removeFromTop(30).removeFromLeft(160));
+    panel.removeFromTop(12);
+    httpsButton.setBounds(panel.removeFromTop(28));
+    panel.removeFromTop(10);
+    helpLabel.setBounds(panel.removeFromTop(72));
+}
+
+bool SettingsPanel::keyPressed(const juce::KeyPress& key)
+{
+    if (key.getKeyCode() == juce::KeyPress::escapeKey)
+    {
+        if (onClose)
+            onClose();
+        return true;
+    }
+
+    return false;
+}
+
 PGStreamAudioProcessorEditor::PGStreamAudioProcessorEditor(PGStreamAudioProcessor& owner)
     : juce::AudioProcessorEditor(&owner),
       processor(owner),
       aboutPanel(juce::ImageFileFormat::loadFrom(PGStreamBinaryData::logo_png,
                                                  static_cast<size_t> (PGStreamBinaryData::logo_pngSize)))
 {
-    setSize(600, 640);
+    setSize(600, 560);
     logoImage = juce::ImageFileFormat::loadFrom(PGStreamBinaryData::pgs_png,
                                                 static_cast<size_t> (PGStreamBinaryData::pgs_pngSize));
 
-    portSlider.setRange(1024, 65535, 1);
-    portSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    portSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 88, 24);
+    portEditor.setInputRestrictions(5, "0123456789");
+    portEditor.setJustification(juce::Justification::centredLeft);
+    portEditor.setSelectAllWhenFocused(true);
+    portEditor.setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff20262a));
+    portEditor.setColour(juce::TextEditor::textColourId, juce::Colour(0xfff3f5f7));
+    portEditor.setColour(juce::TextEditor::outlineColourId, juce::Colour(0xff46535d));
+    portEditor.setColour(juce::TextEditor::focusedOutlineColourId, juce::Colour(0xff8fd3ff));
+    portEditor.onReturnKey = [this] { commitPortText(); };
+    portEditor.onFocusLost = [this] { commitPortText(); };
+
+    transportBox.addItem("WebRTC Opus", 1);
+    transportBox.addItem("PCM16 DataChannel", 2);
+    transportBox.addItem("PCM24 DataChannel", 3);
+    transportBox.addItem("PCM32F DataChannel", 4);
+    transportBox.addItem("Auto", 5);
 
     bitrateBox.addItem("128 kb/s Good Preview", 1);
     bitrateBox.addItem("192 kb/s Very Good", 2);
@@ -447,10 +532,16 @@ PGStreamAudioProcessorEditor::PGStreamAudioProcessorEditor(PGStreamAudioProcesso
     bitrateBox.addItem("320 kb/s High Quality / Recommended", 4);
     bitrateBox.addItem("510 kb/s Experimental Max", 5);
 
-    latencyBox.addItem("Safe", 1);
-    latencyBox.addItem("Balanced", 2);
-    latencyBox.addItem("Low Latency", 3);
-    latencyBox.addItem("Ultra Low / Experimental", 4);
+    bitrateReadoutLabel.setJustificationType(juce::Justification::centredLeft);
+    bitrateReadoutLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xff20262a));
+    bitrateReadoutLabel.setColour(juce::Label::outlineColourId, juce::Colour(0xff46535d));
+    bitrateReadoutLabel.setColour(juce::Label::textColourId, juce::Colour(0xfff3f5f7));
+
+    latencyBox.addItem("Ultra Low", 1);
+    latencyBox.addItem("Low", 2);
+    latencyBox.addItem("Medium", 3);
+    latencyBox.addItem("Safe", 4);
+    latencyBox.addItem("Very Safe", 5);
 
     addAndMakeVisible(enableStreamButton);
     addAndMakeVisible(infoButton);
@@ -460,15 +551,36 @@ PGStreamAudioProcessorEditor::PGStreamAudioProcessorEditor(PGStreamAudioProcesso
         aboutPanel.toFront(true);
         aboutPanel.grabKeyboardFocus();
     };
+    addAndMakeVisible(settingsButton);
+    settingsButton.onClick = [this]
+    {
+        settingsPanel.setVisible(true);
+        settingsPanel.toFront(true);
+        settingsPanel.grabKeyboardFocus();
+    };
 
-    addLabeled(portLabel, portSlider, "Port");
+    addLabeled(portLabel, portEditor, "Port");
+    addAndMakeVisible(portHintLabel);
+    portHintLabel.setText("Valid range: 1024-65535", juce::dontSendNotification);
+    portHintLabel.setJustificationType(juce::Justification::centredLeft);
+    portHintLabel.setColour(juce::Label::textColourId, juce::Colour(0xfff0d7a7));
+    portHintLabel.setVisible(false);
+    addLabeled(transportLabel, transportBox, "Engine");
     addLabeled(bitrateLabel, bitrateBox, "Opus Bitrate");
+    addAndMakeVisible(bitrateReadoutLabel);
     addLabeled(latencyLabel, latencyBox, "Latency Mode");
     addAndMakeVisible(keepAliveButton);
+    addAndMakeVisible(audioPassthroughButton);
+    addAndMakeVisible(alwaysOnTopButton);
+    alwaysOnTopButton.onClick = [this]
+    {
+        if (auto* topLevel = getTopLevelComponent())
+            topLevel->setAlwaysOnTop(alwaysOnTopButton.getToggleState());
+    };
     addAndMakeVisible(nerdButton);
     nerdButton.onClick = [this]
     {
-        setSize(getWidth(), nerdButton.getToggleState() ? 860 : 640);
+        setSize(getWidth(), nerdButton.getToggleState() ? 760 : 560);
         resized();
         timerCallback();
     };
@@ -480,6 +592,24 @@ PGStreamAudioProcessorEditor::PGStreamAudioProcessorEditor(PGStreamAudioProcesso
     qrCodeLabel.setJustificationType(juce::Justification::centred);
     qrCodeLabel.setColour(juce::Label::textColourId, juce::Colour(0xffc7d0d8));
     qrCodeLabel.setText("QR appears when streaming is enabled.", juce::dontSendNotification);
+
+    addAndMakeVisible(qrWarningText);
+    qrWarningText.setReadOnly(true);
+    qrWarningText.setMultiLine(true);
+    qrWarningText.setScrollbarsShown(false);
+    qrWarningText.setCaretVisible(false);
+    qrWarningText.setText("Local self-signed HTTPS certificate. Your browser may show a security warning. Check that the IP address matches this computer. Continue only if you trust this device and your LAN.", false);
+    qrWarningText.setColour(juce::TextEditor::backgroundColourId, juce::Colours::transparentBlack);
+    qrWarningText.setColour(juce::TextEditor::outlineColourId, juce::Colours::transparentBlack);
+    qrWarningText.setColour(juce::TextEditor::focusedOutlineColourId, juce::Colours::transparentBlack);
+    qrWarningText.setColour(juce::TextEditor::textColourId, juce::Colour(0xfff0d7a7));
+    qrWarningText.setFont(juce::Font(11.0f));
+
+    addAndMakeVisible(engineHintLabel);
+    engineHintLabel.setText("Lossless PCM requires self-signed HTTPS. Enable it in Settings to use PCM16/PCM24/PCM32F.", juce::dontSendNotification);
+    engineHintLabel.setJustificationType(juce::Justification::centredLeft);
+    engineHintLabel.setColour(juce::Label::textColourId, juce::Colour(0xfff0d7a7));
+    engineHintLabel.setVisible(false);
 
     for (auto* label : { &urlLabel, &clientsLabel, &statusLabel, &countersLabel, &candidateUrlsLabel })
     {
@@ -497,13 +627,22 @@ PGStreamAudioProcessorEditor::PGStreamAudioProcessorEditor(PGStreamAudioProcesso
         aboutPanel.setVisible(false);
         infoButton.grabKeyboardFocus();
     };
+    addChildComponent(settingsPanel);
+    settingsPanel.onClose = [this]
+    {
+        settingsPanel.setVisible(false);
+        settingsButton.grabKeyboardFocus();
+    };
 
     enableAttachment = std::make_unique<ButtonAttachment>(processor.parameters, ParamIDs::streamEnabled, enableStreamButton);
-    portAttachment = std::make_unique<SliderAttachment>(processor.parameters, ParamIDs::httpsPort, portSlider);
+    transportAttachment = std::make_unique<ComboBoxAttachment>(processor.parameters, ParamIDs::transportMode, transportBox);
     bitrateAttachment = std::make_unique<ComboBoxAttachment>(processor.parameters, ParamIDs::opusBitrate, bitrateBox);
     latencyAttachment = std::make_unique<ComboBoxAttachment>(processor.parameters, ParamIDs::latencyMode, latencyBox);
     keepAliveAttachment = std::make_unique<ButtonAttachment>(processor.parameters, ParamIDs::keepAlive, keepAliveButton);
+    httpsAttachment = std::make_unique<ButtonAttachment>(processor.parameters, ParamIDs::useSelfSignedCertificate, settingsPanel.httpsButton);
+    audioPassthroughAttachment = std::make_unique<ButtonAttachment>(processor.parameters, ParamIDs::audioPassthrough, audioPassthroughButton);
 
+    syncPortText(8123);
     startTimerHz(4);
     timerCallback();
 }
@@ -522,6 +661,64 @@ void PGStreamAudioProcessorEditor::addLabeled(juce::Label& label, juce::Componen
     label.setColour(juce::Label::textColourId, juce::Colour(0xffc7d0d8));
 }
 
+void PGStreamAudioProcessorEditor::commitPortText()
+{
+    if (updatingPortText)
+        return;
+
+    auto value = portEditor.getText().getIntValue();
+    const auto valid = value >= 1024 && value <= 65535;
+    if (! valid)
+    {
+        const auto stats = processor.getStreamStats();
+        value = juce::jlimit(1024, 65535, stats.port);
+    }
+
+    syncPortText(value);
+
+    if (auto* parameter = processor.parameters.getParameter(ParamIDs::httpsPort))
+    {
+        const auto current = static_cast<int> (processor.parameters.getRawParameterValue(ParamIDs::httpsPort)->load());
+        if (current != value)
+            parameter->setValueNotifyingHost(parameter->convertTo0to1(static_cast<float> (value)));
+    }
+}
+
+void PGStreamAudioProcessorEditor::syncPortText(int port)
+{
+    juce::ScopedValueSetter<bool> setter(updatingPortText, true);
+    portEditor.setText(juce::String(juce::jlimit(1024, 65535, port)), juce::dontSendNotification);
+}
+
+juce::String PGStreamAudioProcessorEditor::pcmBitrateTextFor(const juce::String& transportName) const
+{
+    const auto lower = transportName.toLowerCase();
+    if (lower.contains("pcm16"))
+        return "PCM16 48 kHz stereo, approx. 1536 kb/s";
+    if (lower.contains("pcm24"))
+        return "PCM24 48 kHz stereo, approx. 2304 kb/s";
+    if (lower.contains("pcm32"))
+        return "PCM32F 48 kHz stereo, approx. 3072 kb/s";
+    return {};
+}
+
+void PGStreamAudioProcessorEditor::updateEngineAndBitrateUi(const StreamStats& stats)
+{
+    const auto selected = stats.selectedTransportMode.isNotEmpty()
+        ? stats.selectedTransportMode
+        : transportValueName(transportBox.getSelectedItemIndex());
+    const auto pcmText = pcmBitrateTextFor(selected == "Auto" ? stats.transportMode : selected);
+    const auto httpsEnabled = stats.httpsEnabled;
+    const auto pcmSelectedOrActive = pcmText.isNotEmpty();
+
+    transportBox.setEnabled(httpsEnabled);
+    engineHintLabel.setVisible(! httpsEnabled);
+    bitrateBox.setVisible(! pcmSelectedOrActive);
+    bitrateReadoutLabel.setVisible(pcmSelectedOrActive);
+    bitrateReadoutLabel.setText(pcmSelectedOrActive ? pcmText : juce::String(), juce::dontSendNotification);
+    bitrateLabel.setText(pcmSelectedOrActive ? "Bitrate" : "Opus Bitrate", juce::dontSendNotification);
+}
+
 void PGStreamAudioProcessorEditor::paint(juce::Graphics& g)
 {
     g.fillAll(juce::Colour(0xff181b1e));
@@ -536,10 +733,10 @@ void PGStreamAudioProcessorEditor::paint(juce::Graphics& g)
     if (logoImage.isValid())
     {
         g.drawImageWithin(logoImage,
-                          getWidth() - 178,
+                          getWidth() - 160,
                           12,
-                          160,
-                          160,
+                          142,
+                          142,
                           juce::RectanglePlacement::centred | juce::RectanglePlacement::onlyReduceInSize);
     }
 }
@@ -547,39 +744,52 @@ void PGStreamAudioProcessorEditor::paint(juce::Graphics& g)
 void PGStreamAudioProcessorEditor::resized()
 {
     auto area = getLocalBounds().reduced(18);
-    const auto topArea = area.removeFromTop(178);
-    const auto logoSize = 160;
-    const auto qrSizePx = 150;
+    const auto topArea = area.removeFromTop(206);
+    const auto logoSize = 142;
+    const auto qrSizePx = 136;
     const auto logoX = topArea.getRight() - logoSize;
-    const auto qrX = logoX - 14 - qrSizePx;
+    const auto qrX = logoX - 30 - qrSizePx;
     infoButton.setBounds(topArea.getX() + 2, topArea.getY() + 64, 24, 24);
+    settingsButton.setBounds(infoButton.getRight() + 8, infoButton.getY(), 24, 24);
+    keepAliveButton.setBounds(topArea.getX(), topArea.getY() + 96, 220, 24);
+    audioPassthroughButton.setBounds(topArea.getX(), topArea.getY() + 122, 220, 24);
+    alwaysOnTopButton.setBounds(topArea.getX(), topArea.getY() + 148, 220, 24);
     qrCodeImage.setBounds(qrX, topArea.getY(), qrSizePx, qrSizePx);
     qrCodeLabel.setBounds(qrX, qrCodeImage.getBottom() + 4, qrSizePx, 24);
+    qrWarningText.setBounds(qrX - 8, qrCodeLabel.getBottom() + 2, qrSizePx + 16, 48);
 
-    area.removeFromTop(10);
+    area.removeFromTop(2);
 
     enableStreamButton.setBounds(area.removeFromTop(30));
     area.removeFromTop(8);
 
     auto row = area.removeFromTop(34);
     portLabel.setBounds(row.removeFromLeft(120));
-    portSlider.setBounds(row);
+    portEditor.setBounds(row.removeFromLeft(150));
+    row.removeFromLeft(10);
+    portHintLabel.setBounds(row);
+
+    area.removeFromTop(8);
+    row = area.removeFromTop(32);
+    transportLabel.setBounds(row.removeFromLeft(120));
+    transportBox.setBounds(row.removeFromLeft(250));
+    row.removeFromLeft(10);
+    engineHintLabel.setBounds(row);
 
     area.removeFromTop(8);
     row = area.removeFromTop(32);
     bitrateLabel.setBounds(row.removeFromLeft(120));
     bitrateBox.setBounds(row.removeFromLeft(240));
+    bitrateReadoutLabel.setBounds(bitrateBox.getBounds());
     row.removeFromLeft(18);
     latencyLabel.setBounds(row.removeFromLeft(100));
     latencyBox.setBounds(row);
 
-    area.removeFromTop(8);
-    keepAliveButton.setBounds(area.removeFromTop(28));
-    area.removeFromTop(12);
+    area.removeFromTop(10);
 
     urlLabel.setBounds(area.removeFromTop(28));
-    clientsLabel.setBounds(area.removeFromTop(24));
-    statusLabel.setBounds(area.removeFromTop(72));
+    statusLabel.setBounds(area.removeFromTop(42));
+    clientsLabel.setBounds(area.removeFromTop(22));
 
     area.removeFromTop(6);
     nerdButton.setBounds(area.removeFromTop(28).removeFromLeft(90));
@@ -591,12 +801,13 @@ void PGStreamAudioProcessorEditor::resized()
     area.removeFromTop(6);
     if (nerdVisible)
     {
-        countersLabel.setBounds(area.removeFromTop(146));
-        candidateUrlsLabel.setBounds(area.removeFromTop(92));
+        countersLabel.setBounds(area.removeFromTop(128));
+        candidateUrlsLabel.setBounds(area.removeFromTop(74));
         area.removeFromTop(8);
     }
 
     aboutPanel.setBounds(getLocalBounds());
+    settingsPanel.setBounds(getLocalBounds());
 }
 
 void PGStreamAudioProcessorEditor::timerCallback()
@@ -604,46 +815,56 @@ void PGStreamAudioProcessorEditor::timerCallback()
     const auto stats = processor.getStreamStats();
     const auto url = stats.lanUrl;
 
+    if (! portEditor.hasKeyboardFocus(true))
+        syncPortText(stats.port);
+
+    portHintLabel.setVisible(portEditor.hasKeyboardFocus(true));
+    updateEngineAndBitrateUi(stats);
+
     urlLabel.setText("LAN URL: " + (url.isNotEmpty() ? url : "enable stream to bind server"),
                      juce::dontSendNotification);
-    clientsLabel.setText("WebRTC peers: " + juce::String(stats.webrtcPeerCount)
-                            + "    Open tracks: " + juce::String(stats.webrtcOpenTracks),
+    clientsLabel.setText("Clients: " + juce::String(stats.webrtcPeerCount)
+                            + "    Server: " + (stats.serverRunning ? stats.serverScheme.toUpperCase() : "off")
+                            + "    Port: " + juce::String(stats.port),
                          juce::dontSendNotification);
-    statusLabel.setText("Status: " + stats.statusText
-                            + "    Port: " + juce::String(stats.port)
-                            + "    Transport: " + stats.transportMode
-                            + "\nOpus: " + stats.opusBitratePreset
+    statusLabel.setText("Active engine: " + stats.transportMode
+                            + "    Selected: " + stats.selectedTransportMode
+                            + "\nStatus: " + stats.statusText
                             + "    Latency: " + stats.latencyMode
-                            + "    WebRTC: " + stats.webrtcConnectionState + "/" + stats.webrtcIceConnectionState
-                            + "\nInput: " + juce::String(stats.inputSampleRate) + " Hz"
-                            + "    Opus frame: " + juce::String(stats.opusFrameDurationMs) + " ms"
-                            + "    Open tracks: " + juce::String(stats.webrtcOpenTracks),
+                            + "    WebRTC: " + stats.webrtcConnectionState + "/" + stats.webrtcIceConnectionState,
                         juce::dontSendNotification);
 
-    countersLabel.setText("Server FIFO underruns: " + juce::String(stats.serverFifoUnderruns)
-                              + "    Total 48k frames submitted: " + juce::String(stats.framesSent)
-                              + "\nCurrent selected LAN IP: " + (stats.currentLanIp.isNotEmpty() ? stats.currentLanIp : "none")
-                              + "    Bind/listen address: " + stats.listenAddress
-                              + "\nSender queue: " + juce::String(stats.senderQueueFillFrames) + "/"
-                              + juce::String(static_cast<int64_t> (stats.senderQueueCapacityFrames)) + " frames"
-                              + " (" + juce::String(stats.senderQueueFillMs, 1) + " ms)"
-                              + "    Dropped tap frames: " + juce::String(stats.fifoDroppedFrames)
-                              + "\nWebRTC encoded packets: " + juce::String(stats.webrtcEncodedPackets)
-                              + "    Track packets/bytes: " + juce::String(stats.webrtcPacketsSubmittedToTrack)
-                              + "/" + juce::String(stats.webrtcBytesSubmittedToTrack)
-                              + "    RTP sent/fail: " + juce::String(stats.webrtcRtpPacketsSent)
+    countersLabel.setText("Active engine: " + stats.transportMode
+                              + "    Connection: " + stats.webrtcConnectionState + "/" + stats.webrtcIceConnectionState
+                              + "    Clients: " + juce::String(stats.webrtcPeerCount)
+                              + "\nBitrate/throughput: " + (stats.transportMode.contains("PCM") ? pcmBitrateTextFor(stats.transportMode) : stats.opusBitratePreset)
+                              + "    ACK age: " + juce::String(stats.pcmReceiverAckAgeMs, 0) + " ms"
+                              + "    Last reason: " + stats.lastAdaptationReason
+                              + "\nFIFO queue: " + juce::String(stats.senderQueueFillMs, 1) + " ms"
+                              + "    FIFO underruns/drops: " + juce::String(stats.serverFifoUnderruns)
+                              + "/" + juce::String(stats.fifoDroppedFrames)
+                              + "    Encode over-budget: " + juce::String(stats.webrtcEncodeOverBudgetCount)
+                              + "\nOpus RTP sent/fail: " + juce::String(stats.webrtcRtpPacketsSent)
                               + "/" + juce::String(stats.webrtcRtpSendFailures)
-                              + "\nRTP attempts: " + juce::String(stats.webrtcRtpPacketsAttempted)
-                              + "    PT: " + juce::String(stats.webrtcActualPayloadType)
-                              + "    SSRC: " + juce::String(static_cast<int64_t> (stats.webrtcSsrc))
-                              + "    Seq/TS: " + juce::String(static_cast<int> (stats.webrtcSequenceCurrent))
-                              + "/" + juce::String(static_cast<int64_t> (stats.webrtcTimestampCurrent))
-                              + "\nState rev/origin: " + juce::String(stats.stateRevision)
-                              + "/" + stats.stateOrigin
-                              + "    Reason: " + stats.lastAdaptationReason
-                              + "\nRMS L/R: " + juce::String(stats.inputRmsL, 4)
-                              + "/" + juce::String(stats.inputRmsR, 4)
-                              + "    Encode over-budget count: " + juce::String(stats.webrtcEncodeOverBudgetCount),
+                              + "    Packet loss/jitter: browser Stats"
+                              + "\nPCM DC/ready: " + juce::String(stats.pcmOpenChannels)
+                              + "/" + juce::String(stats.pcmReceiverReadyCount)
+                              + "    DC queued: " + juce::String(static_cast<int64_t> (stats.pcmDataChannelBufferedBytes)) + " bytes"
+                              + "    Dropped before send: " + juce::String(stats.pcmDroppedBeforeSend)
+                              + "\nPCM stream: " + juce::String(stats.pcmPacketFrames) + " frames/packet"
+                              + "    AudioContext: " + (stats.pcmAudioContextSampleRate > 0.0 ? juce::String(stats.pcmAudioContextSampleRate, 0) + " Hz" : "unknown")
+                              + "    base/output: " + juce::String(stats.pcmAudioContextBaseLatencyMs, 2)
+                              + "/" + juce::String(stats.pcmAudioContextOutputLatencyMs, 2) + " ms"
+                              + "\nPCM missing/late/overflow: " + juce::String(stats.pcmReceiverMissingPackets)
+                              + "/" + juce::String(stats.pcmReceiverLatePackets)
+                              + "/" + juce::String(stats.pcmReceiverOverflows)
+                              + "    PCM packets/bytes/fail: " + juce::String(stats.pcmPacketsSent)
+                              + "/" + juce::String(stats.pcmBytesSent)
+                              + "/" + juce::String(stats.pcmSendFailures)
+                              + "\nPCM buffer/target/underruns: " + juce::String(stats.pcmReceiverBufferMs, 1)
+                              + "/" + juce::String(stats.pcmTargetBufferMs)
+                              + " ms / " + juce::String(stats.pcmReceiverUnderflows)
+                              + "    Secure context: browser Stats",
                           juce::dontSendNotification);
 
     juce::StringArray candidateUrls;

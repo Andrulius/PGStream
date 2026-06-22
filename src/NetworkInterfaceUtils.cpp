@@ -133,9 +133,9 @@ int rankCandidate(const Candidate& candidate)
     return 100;
 }
 
-juce::String makeUrl(const juce::String& address, int port)
+juce::String makeUrl(const juce::String& address, int port, bool useHttps)
 {
-    return "http://" + address + ":" + juce::String(port) + "/";
+    return (useHttps ? "https://" : "http://") + address + ":" + juce::String(port) + "/";
 }
 
 juce::String describeCandidate(const Candidate& candidate)
@@ -300,7 +300,7 @@ std::vector<Candidate> enumerateCandidates()
 }
 }
 
-NetworkInterfaceSelection selectBestLanInterface(int port)
+NetworkInterfaceSelection selectBestLanInterface(int port, bool useHttps)
 {
     auto candidates = enumerateCandidates();
     std::sort(candidates.begin(), candidates.end(), [] (const Candidate& a, const Candidate& b)
@@ -329,7 +329,7 @@ NetworkInterfaceSelection selectBestLanInterface(int port)
         if (candidate.isLinkLocal && hasNonLinkLocalNonLoopback)
             continue;
 
-        const auto url = makeUrl(candidate.address, port);
+        const auto url = makeUrl(candidate.address, port, useHttps);
         selection.candidateUrls.addIfNotAlreadyThere(url);
         selection.candidateDescriptions.addIfNotAlreadyThere(describeCandidate(candidate));
 
@@ -343,7 +343,7 @@ NetworkInterfaceSelection selectBestLanInterface(int port)
     if (selection.primaryAddress.isEmpty())
     {
         selection.primaryAddress = "127.0.0.1";
-        selection.primaryUrl = makeUrl(selection.primaryAddress, port);
+        selection.primaryUrl = makeUrl(selection.primaryAddress, port, useHttps);
         selection.candidateUrls.addIfNotAlreadyThere(selection.primaryUrl);
         selection.candidateDescriptions.addIfNotAlreadyThere("127.0.0.1 - loopback fallback");
     }

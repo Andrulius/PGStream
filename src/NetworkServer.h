@@ -26,7 +26,7 @@ public:
 
     void applyConfig(const StreamConfig& newConfig);
     void setSessionSampleRate(double sampleRate);
-    void setActiveProfileCallback(std::function<void(OpusBitrateMode, LatencyMode)> callback);
+    void setActiveProfileCallback(std::function<void(OpusBitrateMode, LatencyMode, TransportMode)> callback);
     StreamStats getStats() const;
 
 private:
@@ -35,7 +35,7 @@ private:
     bool startServer(const StreamConfig& newConfig);
     void stopServer();
     void updateStatus(juce::String text);
-    void refreshLanSelection(int port);
+    void refreshLanSelection(int port, bool useHttps);
 
     int handleHttpRequest(mg_connection* connection);
 
@@ -47,7 +47,7 @@ private:
     static int logHandler(const mg_connection*, const char*);
 
     void handleWebSocketText(mg_connection* connection, const char* data, size_t dataLen);
-    void notifyActiveProfileChanged(OpusBitrateMode bitrateMode, LatencyMode latencyMode);
+    void notifyActiveProfileChanged(OpusBitrateMode bitrateMode, LatencyMode latencyMode, TransportMode transportMode);
     void noteStateChangeLocked(const char* origin, const char* reason);
     void sendStateUpdate(mg_connection* connection, const StreamStats& stats);
     void broadcastStateUpdate(const StreamStats& stats);
@@ -61,9 +61,11 @@ private:
     juce::String lastAdaptationReason { "startup" };
     juce::String lastAdaptationTimestamp;
     juce::String lastStateUpdateSentTimestamp;
+    juce::String autonegotiationMode { "quality" };
+    juce::String autonegotiationState { "inactive" };
 
     mutable std::mutex callbackMutex;
-    std::function<void(OpusBitrateMode, LatencyMode)> activeProfileCallback;
+    std::function<void(OpusBitrateMode, LatencyMode, TransportMode)> activeProfileCallback;
 
     mutable std::mutex websocketMutex;
     std::unordered_set<mg_connection*> websocketConnections;

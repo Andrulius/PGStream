@@ -22,6 +22,16 @@
 
     <section class="controls" aria-label="Stream controls">
       <label>
+        <span>Engine</span>
+        <select id="engineSelect">
+          <option value="opus" selected>Opus</option>
+          <option value="pcm16">PCM16 DataChannel</option>
+          <option value="pcm24">PCM24 DataChannel</option>
+          <option value="pcm32f">PCM32F DataChannel</option>
+          <option value="auto">Auto</option>
+        </select>
+      </label>
+      <label>
         <span>Bitrate</span>
         <select id="bitrateSelect">
           <option value="128000">128 kb/s Good Preview</option>
@@ -30,45 +40,105 @@
           <option value="320000" selected>320 kb/s High Quality / Recommended</option>
           <option value="510000">510 kb/s Experimental Max</option>
         </select>
+        <div id="bitrateReadout" class="readonly-field" hidden>PCM32F 48 kHz stereo, approx. 3072 kb/s</div>
       </label>
       <label>
         <span>Latency</span>
         <select id="latencySelect">
+          <option value="ultra">Ultra Low</option>
+          <option value="low">Low</option>
+          <option value="medium" selected>Medium</option>
           <option value="safe">Safe</option>
-          <option value="balanced" selected>Balanced</option>
-          <option value="low">Low Latency</option>
-          <option value="ultra">Ultra Low / Experimental</option>
+          <option value="very-safe">Very Safe</option>
         </select>
       </label>
       <label>
         <span>Auto mode</span>
         <select id="autoModeSelect">
-          <option value="balanced" selected>Balanced</option>
-          <option value="quality">Quality Priority</option>
+          <option value="quality" selected>Quality Priority</option>
           <option value="latency">Latency Priority</option>
         </select>
       </label>
       <button id="autoButton" class="secondary" type="button">Auto Negotiate</button>
     </section>
 
-    <audio id="remoteAudio" autoplay playsinline controls></audio>
+    <audio id="remoteAudio" autoplay playsinline hidden></audio>
 
-    <section class="grid main-metrics">
-      <div class="metric">
-        <span>Status</span>
-        <strong id="connection">stopped</strong>
+    <section id="nerdPanel" class="nerd" hidden>
+      <div class="nerd-group">
+        <h2>Common</h2>
+        <div class="grid">
+          <div class="metric">
+            <span>Status</span>
+            <strong id="connection">stopped</strong>
+          </div>
+          <div class="metric">
+            <span>Active engine</span>
+            <strong id="transport">-</strong>
+          </div>
+          <div class="metric">
+            <span>Codec / format</span>
+            <strong id="codec">-</strong>
+          </div>
+          <div class="metric">
+            <span>Bitrate</span>
+            <strong id="bitrate">-</strong>
+          </div>
+          <div class="metric">
+            <span>Actual throughput</span>
+            <strong id="actualBitrate">0 kb/s</strong>
+          </div>
+          <div class="metric">
+            <span>Round trip time</span>
+            <strong id="roundTripTime">-</strong>
+          </div>
+          <div class="metric">
+            <span>Last fallback / reason</span>
+            <strong id="lastReason">-</strong>
+          </div>
+        </div>
       </div>
-      <div class="metric">
-        <span>Transport</span>
-        <strong id="transport">-</strong>
-      </div>
-      <div class="metric">
-        <span>Codec</span>
-        <strong id="codec">-</strong>
-      </div>
-      <div class="metric">
-        <span>Bitrate</span>
-        <strong id="bitrate">-</strong>
+
+      <div class="nerd-group">
+        <h2>Security</h2>
+        <div class="grid">
+          <div class="metric">
+            <span>location.protocol</span>
+            <strong id="receiverProtocol">-</strong>
+          </div>
+          <div class="metric">
+            <span>Secure context</span>
+            <strong id="secureContext">-</strong>
+          </div>
+          <div class="metric">
+            <span>AudioWorklet</span>
+            <strong id="audioWorkletAvailable">-</strong>
+          </div>
+          <div class="metric">
+            <span>AudioContext sampleRate</span>
+            <strong id="audioContextSampleRate">-</strong>
+          </div>
+          <div class="metric">
+            <span>AudioContext baseLatency</span>
+            <strong id="audioContextBaseLatency">-</strong>
+          </div>
+          <div class="metric">
+            <span>AudioContext outputLatency</span>
+            <strong id="audioContextOutputLatency">-</strong>
+          </div>
+          <div class="metric">
+            <span>Signaling scheme</span>
+            <strong id="signalingScheme">-</strong>
+          </div>
+          <div class="metric">
+            <span>Receiver scheme</span>
+            <strong id="receiverScheme">-</strong>
+          </div>
+          <div class="metric">
+            <span>Certificate mode</span>
+            <strong id="certificateMode">-</strong>
+          </div>
+        </div>
       </div>
 
       <div class="nerd-group">
@@ -98,19 +168,19 @@
             <span>Stable zero-loss</span>
             <strong id="autoStableTime">0.0 s</strong>
           </div>
-          <div class="metric">
+          <div class="metric" hidden>
             <span>Baseline packetsLost</span>
             <strong id="autoBaselinePacketsLost">-</strong>
           </div>
-          <div class="metric">
+          <div class="metric" hidden>
             <span>Current packetsLost</span>
             <strong id="autoCurrentPacketsLost">-</strong>
           </div>
-          <div class="metric">
+          <div class="metric" hidden>
             <span>Packet loss delta</span>
             <strong id="autoLossDelta">0</strong>
           </div>
-          <div class="metric">
+          <div class="metric" hidden>
             <span>Profile index</span>
             <strong id="autoProfileIndex">0/0</strong>
           </div>
@@ -118,11 +188,11 @@
             <span>Active encoder bitrate</span>
             <strong id="activeEncoderBitrate">-</strong>
           </div>
-          <div class="metric">
+          <div class="metric" hidden>
             <span>Active Opus frame</span>
             <strong id="activeOpusFrame">-</strong>
           </div>
-          <div class="metric">
+          <div class="metric" hidden>
             <span>Profile changes</span>
             <strong id="autoProfileChanges">0</strong>
           </div>
@@ -140,9 +210,7 @@
           </div>
         </div>
       </div>
-    </section>
 
-    <section id="nerdPanel" class="nerd" hidden>
       <div class="nerd-group">
         <h2>WebRTC</h2>
         <div class="grid">
@@ -155,10 +223,6 @@
             <strong id="iceConnectionState">closed</strong>
           </div>
           <div class="metric">
-            <span>Actual bitrate estimate</span>
-            <strong id="actualBitrate">0 kb/s</strong>
-          </div>
-          <div class="metric">
             <span>Packets received</span>
             <strong id="packetsReceived">0</strong>
           </div>
@@ -169,10 +233,6 @@
           <div class="metric">
             <span>Jitter</span>
             <strong id="jitter">0 ms</strong>
-          </div>
-          <div class="metric">
-            <span>Round trip time</span>
-            <strong id="roundTripTime">-</strong>
           </div>
           <div class="metric">
             <span>Concealed samples</span>
@@ -231,6 +291,72 @@
           <div class="metric">
             <span>RTP attempts</span>
             <strong id="rtpAttempts">0</strong>
+          </div>
+        </div>
+      </div>
+
+      <div class="nerd-group">
+        <h2>PCM</h2>
+        <div class="grid">
+          <div class="metric">
+            <span>Engine</span>
+            <strong id="pcmEngine">-</strong>
+          </div>
+          <div class="metric">
+            <span>DataChannel</span>
+            <strong id="pcmDataChannelState">closed</strong>
+          </div>
+          <div class="metric">
+            <span>DataChannel queued bytes</span>
+            <strong id="pcmQueuedBytes">0</strong>
+          </div>
+          <div class="metric">
+            <span>AudioWorklet</span>
+            <strong id="pcmWorkletState">not ready</strong>
+          </div>
+          <div class="metric">
+            <span>Secure context</span>
+            <strong id="pcmSecureContext">-</strong>
+          </div>
+          <div class="metric">
+            <span>SAB / isolated</span>
+            <strong id="pcmSabState">-</strong>
+          </div>
+          <div class="metric">
+            <span>Buffer</span>
+            <strong id="pcmBufferMs">0 ms</strong>
+          </div>
+          <div class="metric">
+            <span>Target buffer</span>
+            <strong id="pcmTargetBufferMs">0 ms</strong>
+          </div>
+          <div class="metric">
+            <span>Packets</span>
+            <strong id="pcmPackets">0</strong>
+          </div>
+          <div class="metric">
+            <span>Stream / sample rate</span>
+            <strong id="pcmStreamInfo">-</strong>
+          </div>
+          <div class="metric">
+            <span>Packet duration</span>
+            <strong id="pcmPacketDuration">-</strong>
+          </div>
+          <div class="metric">
+            <span>Drops / underflows</span>
+            <strong id="pcmDrops">0 / 0</strong>
+          </div>
+          <div class="metric">
+            <span>Missing / late packets</span>
+            <strong id="pcmPacketGaps">0 / 0</strong>
+          </div>
+          <div class="metric">
+            <span>ACK age</span>
+            <strong id="pcmAckAge">-</strong>
+          </div>
+          <div class="metric">
+            <span>Last reason</span>
+            <strong id="pcmLastReason">-</strong>
           </div>
         </div>
       </div>

@@ -46,15 +46,18 @@ private:
     void parameterChanged(const juce::String& parameterID, float newValue) override;
     void handleAsyncUpdate() override;
     void applyCurrentStreamConfig();
-    void requestProfileParameterSync(OpusBitrateMode bitrateMode, LatencyMode latencyMode);
+    void requestProfileParameterSync(OpusBitrateMode bitrateMode, LatencyMode latencyMode, TransportMode transportMode);
     void applyPendingProfileParameterSync();
+    void enforceHttpEngineLimit();
 
     AudioTapFifo tapFifo;
     NetworkServer networkServer;
     std::atomic<double> currentSampleRate { 48000.0 };
     std::atomic<bool> tapEnabled { false };
+    std::atomic<bool> audioPassthroughEnabled { true };
     std::atomic<int> pendingBitrateMode { -1 };
     std::atomic<int> pendingLatencyMode { -1 };
+    std::atomic<int> pendingTransportMode { -1 };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PGStreamAudioProcessor)
 };

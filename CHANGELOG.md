@@ -1,5 +1,81 @@
 # Changelog
 
+## PGStream lossless PCM DataChannel and HTTPS secure-context support - version 0.8
+
+Files changed:
+
+- Native: `src/StreamTypes.h`, `src/WebRtcAudioSender.*`, `src/NetworkServer.*`, `src/PluginState.*`, `src/PluginEditor.*`, `src/PluginProcessor.*`, `src/SelfSignedCertificate.*`, `src/HtmlAssets.cpp`, `src/NetworkInterfaceUtils.*`, `CMakeLists.txt`.
+- Browser: `assets/web/index.html`, `assets/web/app.js`, `assets/web/pcm-worklet.js`, `assets/web/style.css`.
+- Documentation and artifacts: `README.md`, `CHANGELOG.md`, root `PGStream.vst3`, `dist/PGStream.vst3`.
+
+Added:
+
+- Added stream engine selection for Opus, PCM16 DataChannel, PCM24 DataChannel, PCM32F DataChannel, and Auto.
+- Added PCM32F as the high-quality Float32 transport; it sends 48 kHz stereo Float32 samples without integer quantization in the PCM transport layer.
+- Added self-signed HTTPS support using the bundled Mbed TLS stack and CivetWeb TLS mode.
+- Added browser-owned WebRTC DataChannel transport for PCM with label `pgs-pcm-audio`, unordered delivery, and no retransmission.
+- Added PCM `PGPC` 40-byte packet format with version, codec, channels, header size, sample rate, sequence, split 64-bit sample time, frame count, payload byte count, stream id, and flags.
+- Added fixed 10 ms / 480-frame PCM packets at 48 kHz for PCM16LE, PCM24LE, and PCM32FLE.
+- Added browser AudioWorklet playback with one SharedArrayBuffer-backed planar Float32 ring buffer. The ring is also the PCM playout/jitter buffer; there is no separate reorder buffer.
+- Added AudioContext setup for PCM with `latencyHint: "interactive"` and requested `sampleRate: 48000`, plus visible actual sample rate/base latency/output latency diagnostics.
+- Added Media Session metadata and playback-state handling for active/stopped browser playback.
+- Added PCM receiver readiness ACK over the existing signaling/control path so native sends full PCM only after DataChannel, AudioContext, AudioWorklet, ring buffer, and secure context are ready.
+- Added PCM DataChannel backpressure handling and visible dropped-before-send counters.
+- Added latency-mode target-fill control for PCM: Ultra Low 20 ms, Low 40 ms, Medium 70 ms, Safe 120 ms, Very Safe 180 ms.
+- Added Audio Passthrough and self-signed HTTPS plugin parameters.
+- Added plugin Settings popup behind a small `S` button; self-signed HTTPS is configured there instead of in the main UI.
+- Replaced the plugin port slider with a validated numeric port input.
+- Added plugin PCM bitrate readouts so PCM16/PCM24/PCM32F no longer show Opus bitrate labels.
+- Added best-effort plugin Always on top toggle.
+- Added browser PCM bitrate readout, AudioContext diagnostics, PCM stream id, sample rate, packet duration, queue, missing/late, overflow, and underflow stats.
+- Added Engine and Auto priority synchronization through the existing `stream_state_update`/control path.
+- Added one-shot browser Auto Negotiation. Quality priority tests PCM32F through all latency targets, then PCM24, then PCM16, then Opus. Latency priority tests PCM32F/PCM24/PCM16/Opus at each latency before moving higher.
+
+Changed:
+
+- Normal plugin and browser views are more compact; extended diagnostics are collapsed behind Nerd/Stats.
+- PCM latency modes now change browser target fill only; PCM packet size stays fixed at 480 frames.
+- HTTP/WS mode now forces both selected and active engine state to Opus instead of leaving selected PCM with active Opus.
+- Browser manual PCM selection in a non-secure context now reports an error instead of silently starting Opus.
+- Browser manual PCM setup rejects a non-48 kHz AudioContext instead of pretending PCM is sample-accurate without resampling.
+- Browser Stats include secure-context diagnostics for receiver protocol, signaling scheme, AudioWorklet availability, certificate mode, and AudioContext timing.
+
+Removed:
+
+- Removed the separate browser PCM packet reorder/jitter buffer from this branch.
+- Removed the PCM AudioWorklet queue fallback path. PCM now requires SharedArrayBuffer/cross-origin isolation and uses the single playback ring.
+- Removed latency-dependent PCM packet sizing from this branch.
+
+Preserved:
+
+- Opus remains on the existing WebRTC media/RTP path.
+- WebSocket/WSS remains signaling/control only; PCM audio is not sent over WebSocket.
+- The DAW realtime audio thread still only pushes into the existing preallocated FIFO before optional passthrough mute.
+- The existing Opus connection/signaling flow was kept in place while PCM uses its separate DataChannel audio path.
+
+Audit:
+
+- The branch already contained partial PCM16/PCM24 DataChannel code, browser parsing/playback code, and PCM UI/state plumbing.
+- Existing HTTPS, Settings, port validation, LAN display, and UI polish from the v0.8 branch were reused.
+- The old partial PCM packet format used `PGSP`, supported PCM16/PCM24 only, changed packet sizing with latency, and had a separate browser packet buffer before playback.
+- Missing pieces were PCM32F, the final `PGPC` 40-byte header, fixed 480-frame packets, one-ring browser playback, AudioContext diagnostics, Media Session state, backpressure drops, and final Auto Negotiation ordering.
+- The old WebSocket binary audio fallback and AudioWorklet player were documented as removed in v0.7.
+- The final v0.8 implementation uses one coherent PCM path: plugin FIFO, PCM packetizer, WebRTC DataChannel, browser parser, browser playback ring buffer, AudioWorklet, output.
+
+Known limitations:
+
+- Runtime LAN audibility for PCM16/PCM24/PCM32F still needs manual DAW/browser testing.
+- PCM requires HTTPS secure context, cross-origin isolation, SharedArrayBuffer, AudioWorklet, and an actual 48 kHz AudioContext.
+- Browser control/config remains on the existing WebSocket/WSS signaling path instead of a separate reliable WebRTC control DataChannel.
+- No PLC, resampling, time stretching, dynamic speed correction, or continuous background quality switching was added.
+
+Tests:
+
+- Built Release with `scripts/build_release_windows.ps1`.
+- Verified `dist\PGStream.vst3` and root `PGStream.vst3` with `scripts\verify_artifact_windows.ps1`.
+- Checked browser JavaScript syntax with `node --check` for `assets\web\app.js` and `assets\web\pcm-worklet.js`.
+- Checked repository whitespace with `git diff --check`.
+
 ## PGStream WebRTC media path and Auto Negotiate UI sync fix - version 0.7
 
 Fixed:

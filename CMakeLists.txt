@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(PGStream VERSION 0.7.0 LANGUAGES C CXX)
+project(PGStream VERSION 0.8.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -24,6 +24,12 @@ set(USE_SHARED_MBEDTLS_LIBRARY OFF CACHE BOOL "" FORCE)
 add_subdirectory(external/mbedtls EXCLUDE_FROM_ALL)
 if(TARGET mbedtls AND NOT TARGET MbedTLS::MbedTLS)
     add_library(MbedTLS::MbedTLS ALIAS mbedtls)
+endif()
+if(TARGET mbedx509 AND NOT TARGET MbedTLS::X509)
+    add_library(MbedTLS::X509 ALIAS mbedx509)
+endif()
+if(TARGET mbedcrypto AND NOT TARGET MbedTLS::Crypto)
+    add_library(MbedTLS::Crypto ALIAS mbedcrypto)
 endif()
 
 set(OPUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
@@ -68,11 +74,17 @@ target_compile_definitions(civetweb_static
         NO_CGI
         NO_FILES
         NO_CACHING
-        NO_SSL
+        USE_MBEDTLS
         USE_STACK_SIZE=102400
         _CRT_SECURE_NO_WARNINGS
         WIN32_LEAN_AND_MEAN
         NOMINMAX)
+
+target_link_libraries(civetweb_static
+    PRIVATE
+        MbedTLS::MbedTLS
+        MbedTLS::X509
+        MbedTLS::Crypto)
 
 if(MSVC)
     target_compile_options(civetweb_static PRIVATE /W0)
@@ -84,6 +96,7 @@ juce_add_binary_data(PGStreamAssets
     SOURCES
         assets/web/index.html
         assets/web/app.js
+        assets/web/pcm-worklet.js
         assets/web/style.css
         assets/logo.png
         assets/pgs.png)
@@ -114,6 +127,7 @@ target_sources(PGStream
         src/NetworkServer.cpp
         src/NetworkInterfaceUtils.cpp
         src/WebRtcAudioSender.cpp
+        src/SelfSignedCertificate.cpp
         src/Resampler.cpp
         src/HtmlAssets.cpp)
 
@@ -136,6 +150,9 @@ target_link_libraries(PGStream
         civetweb_static
         Opus::opus
         LibDataChannel::LibDataChannelStatic
+        MbedTLS::MbedTLS
+        MbedTLS::X509
+        MbedTLS::Crypto
         ws2_32
         iphlpapi
         crypt32

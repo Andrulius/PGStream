@@ -12,5 +12,5 @@ struct NetworkInterfaceSelection
     juce::StringArray candidateDescriptions;
 };
 
-NetworkInterfaceSelection selectBestLanInterface(int port);
+NetworkInterfaceSelection selectBestLanInterface(int port, bool useHttps);
 }

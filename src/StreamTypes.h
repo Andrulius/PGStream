@@ -18,23 +18,126 @@ enum class OpusBitrateMode : int
 
 enum class LatencyMode : int
 {
-    safe = 0,
-    balanced = 1,
-    lowLatency = 2,
-    ultraLowExperimental = 3
+    ultraLowExperimental = 0,
+    lowLatency = 1,
+    medium = 2,
+    safe = 3,
+    verySafe = 4
+};
+
+enum class TransportMode : int
+{
+    opusWebRtc = 0,
+    pcm16DataChannel = 1,
+    pcm24DataChannel = 2,
+    pcm32FloatDataChannel = 3,
+    autoSelect = 4
 };
 
 struct StreamConfig
 {
     bool streamEnabled = false;
     int port = 8123;
+    TransportMode selectedTransportMode = TransportMode::opusWebRtc;
+    TransportMode transportMode = TransportMode::opusWebRtc;
     OpusBitrateMode opusBitrateMode = OpusBitrateMode::highQuality320;
-    LatencyMode latencyMode = LatencyMode::balanced;
+    LatencyMode latencyMode = LatencyMode::medium;
     bool keepAliveWhenIdle = true;
+    bool useSelfSignedCertificate = true;
+    bool audioPassthrough = true;
     double sessionSampleRate = 48000.0;
+
+    static TransportMode resolveTransportMode(TransportMode selectedMode, bool httpsEnabled)
+    {
+        if (! httpsEnabled
+            && (selectedMode == TransportMode::pcm16DataChannel
+                || selectedMode == TransportMode::pcm24DataChannel
+                || selectedMode == TransportMode::pcm32FloatDataChannel
+                || selectedMode == TransportMode::autoSelect))
+            return TransportMode::opusWebRtc;
+
+        if (selectedMode == TransportMode::autoSelect)
+            return TransportMode::pcm32FloatDataChannel;
+
+        return selectedMode;
+    }
+
+    bool usesHttps() const
+    {
+        return useSelfSignedCertificate;
+    }
+
+    bool usesPcmDataChannel() const
+    {
+        return transportMode == TransportMode::pcm16DataChannel
+            || transportMode == TransportMode::pcm24DataChannel
+            || transportMode == TransportMode::pcm32FloatDataChannel;
+    }
+
+    int pcmBitsPerSample() const
+    {
+        if (transportMode == TransportMode::pcm16DataChannel)
+            return 16;
+        if (transportMode == TransportMode::pcm24DataChannel)
+            return 24;
+        return 32;
+    }
+
+    int pcmCodecId() const
+    {
+        if (! usesPcmDataChannel())
+            return 0;
+        if (transportMode == TransportMode::pcm16DataChannel)
+            return 1;
+        if (transportMode == TransportMode::pcm24DataChannel)
+            return 2;
+        return 3;
+    }
+
+    int pcmPacketFrameCount() const
+    {
+        return 480;
+    }
+
+    int pcmTargetBufferMs() const
+    {
+        if (latencyMode == LatencyMode::ultraLowExperimental)
+            return 20;
+        if (latencyMode == LatencyMode::lowLatency)
+            return 40;
+        if (latencyMode == LatencyMode::medium)
+            return 70;
+        if (latencyMode == LatencyMode::safe)
+            return 120;
+        return 180;
+    }
+
+    juce::String serverScheme() const
+    {
+        return usesHttps() ? "https" : "http";
+    }
+
+    juce::String selectedTransportModeName() const
+    {
+        if (selectedTransportMode == TransportMode::pcm16DataChannel)
+            return "PCM16 DataChannel";
+        if (selectedTransportMode == TransportMode::pcm24DataChannel)
+            return "PCM24 DataChannel";
+        if (selectedTransportMode == TransportMode::pcm32FloatDataChannel)
+            return "PCM32F DataChannel";
+        if (selectedTransportMode == TransportMode::autoSelect)
+            return "Auto";
+        return "WebRTC Opus";
+    }
 
     juce::String transportModeName() const
     {
+        if (transportMode == TransportMode::pcm16DataChannel)
+            return "PCM16 DataChannel";
+        if (transportMode == TransportMode::pcm24DataChannel)
+            return "PCM24 DataChannel";
+        if (transportMode == TransportMode::pcm32FloatDataChannel)
+            return "PCM32F DataChannel";
         return "WebRTC Opus";
     }
 
@@ -66,24 +169,28 @@ struct StreamConfig
 
     juce::String latencyModeName() const
     {
+        if (latencyMode == LatencyMode::ultraLowExperimental)
+            return "Ultra Low";
+        if (latencyMode == LatencyMode::lowLatency)
+            return "Low";
+        if (latencyMode == LatencyMode::medium)
+            return "Medium";
         if (latencyMode == LatencyMode::safe)
             return "Safe";
-        if (latencyMode == LatencyMode::lowLatency)
-            return "Low Latency";
-        if (latencyMode == LatencyMode::ultraLowExperimental)
-            return "Ultra Low / Experimental";
-        return "Balanced";
+        return "Very Safe";
     }
 
     juce::String latencyTargetDescription() const
     {
-        if (latencyMode == LatencyMode::safe)
-            return "about 80-150 ms";
-        if (latencyMode == LatencyMode::lowLatency)
-            return "about 25-60 ms";
         if (latencyMode == LatencyMode::ultraLowExperimental)
-            return "about 15-40 ms experimental";
-        return "about 40-90 ms";
+            return "20 ms PCM target fill";
+        if (latencyMode == LatencyMode::lowLatency)
+            return "40 ms PCM target fill";
+        if (latencyMode == LatencyMode::medium)
+            return "70 ms PCM target fill";
+        if (latencyMode == LatencyMode::safe)
+            return "120 ms PCM target fill";
+        return "180 ms PCM target fill";
     }
 
     int playoutDelayHintMs() const
@@ -92,6 +199,8 @@ struct StreamConfig
             return 150;
         if (latencyMode == LatencyMode::lowLatency || latencyMode == LatencyMode::ultraLowExperimental)
             return 30;
+        if (latencyMode == LatencyMode::verySafe)
+            return 180;
         return 80;
     }
 
@@ -118,6 +227,14 @@ struct StreamStats
     juce::String listenAddress;
     juce::String statusText;
     juce::String transportMode;
+    juce::String selectedTransportMode;
+    juce::String serverScheme;
+    bool httpsEnabled = true;
+    bool selfSignedCertificateEnabled = true;
+    bool audioPassthrough = true;
+    int pcmBitsPerSample = 0;
+    int pcmPacketFrames = 480;
+    int pcmTargetBufferMs = 70;
     int inputSampleRate = 48000;
     int selectedOpusBitrateBps = 320000;
     juce::String selectedOpusBitratePreset;
@@ -166,6 +283,27 @@ struct StreamStats
     uint64_t webrtcPacketsSubmittedToTrack = 0;
     uint64_t webrtcBytesSubmittedToTrack = 0;
     uint64_t webrtcSubmitErrors = 0;
+    int pcmOpenChannels = 0;
+    int pcmReceiverReadyCount = 0;
+    uint64_t pcmPacketsSent = 0;
+    uint64_t pcmBytesSent = 0;
+    uint64_t pcmSendCalls = 0;
+    uint64_t pcmSendFailures = 0;
+    uint64_t pcmDroppedBeforeSend = 0;
+    uint64_t pcmDataChannelBufferedBytes = 0;
+    uint64_t pcmSequenceCurrent = 0;
+    uint64_t pcmSampleCursor = 0;
+    uint64_t pcmReceiverStatsCount = 0;
+    double pcmReceiverBufferMs = 0.0;
+    double pcmReceiverAckAgeMs = -1.0;
+    uint64_t pcmReceiverUnderflows = 0;
+    uint64_t pcmReceiverOverflows = 0;
+    uint64_t pcmReceiverMissingPackets = 0;
+    uint64_t pcmReceiverLatePackets = 0;
+    double pcmAudioContextSampleRate = 0.0;
+    double pcmAudioContextBaseLatencyMs = -1.0;
+    double pcmAudioContextOutputLatencyMs = -1.0;
+    juce::String pcmReceiverLastError;
     uint64_t opusEncodeErrors = 0;
     int opusPacketBytesLast = 0;
     double opusPacketBytesAvg = 0.0;

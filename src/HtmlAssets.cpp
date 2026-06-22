@@ -24,6 +24,12 @@ bool getHtmlAsset(const char* uri, HtmlAsset& asset)
         return true;
     }
 
+    if (std::strcmp(uri, "/pcm-worklet.js") == 0)
+    {
+        asset = { PGStreamBinaryData::pcmworklet_js, static_cast<size_t> (PGStreamBinaryData::pcmworklet_jsSize), "application/javascript; charset=utf-8" };
+        return true;
+    }
+
     if (std::strcmp(uri, "/pgs.png") == 0)
     {
         asset = { reinterpret_cast<const char*> (PGStreamBinaryData::pgs_png),
