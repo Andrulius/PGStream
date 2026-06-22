@@ -15,6 +15,7 @@ namespace pgstream
 namespace
 {
 constexpr int opusSampleRate = 48000;
+constexpr int pcmTransportSampleRate = opusSampleRate;
 constexpr int opusChannels = 2;
 constexpr int defaultOpusPayloadType = 111;
 constexpr int maxRtpPayloadType = 127;
@@ -295,15 +296,15 @@ void WebRtcAudioSender::applyConfig(const StreamConfig& newConfig)
     std::lock_guard<std::mutex> lock(mutex);
     const auto previousTransportMode = config.transportMode;
     const auto previousLatencyMode = config.latencyMode;
-    const auto previousPcmFrames = config.pcmPacketFrameCount();
+    const auto previousPcmFrames = config.pcmPacketFrameCount(pcmTransportSampleRate);
     const auto previousPcmCodecId = config.pcmCodecId();
     config = newConfig;
-    const auto pcmFrames = static_cast<size_t> (config.pcmPacketFrameCount());
+    const auto pcmFrames = static_cast<size_t> (config.pcmPacketFrameCount(pcmTransportSampleRate));
     if (pcmPending.size() < pcmFrames * pcmChannels)
         pcmPending.resize(pcmFrames * pcmChannels);
     if (pcmPacket.size() < pcmHeaderBytes + pcmFrames * pcmChannels * 4)
         pcmPacket.resize(pcmHeaderBytes + pcmFrames * pcmChannels * 4);
-    if (previousPcmFrames != config.pcmPacketFrameCount()
+    if (previousPcmFrames != config.pcmPacketFrameCount(pcmTransportSampleRate)
         || previousPcmCodecId != config.pcmCodecId()
         || previousTransportMode != config.transportMode
         || previousLatencyMode != config.latencyMode)
@@ -810,7 +811,7 @@ void WebRtcAudioSender::encodeAndSend(const float* interleavedStereo48k, size_t 
 
     if (config.usesPcmDataChannel())
     {
-        const auto packetFrames = static_cast<size_t> (config.pcmPacketFrameCount());
+        const auto packetFrames = static_cast<size_t> (config.pcmPacketFrameCount(pcmTransportSampleRate));
         if (pcmPending.size() < packetFrames * pcmChannels)
             pcmPending.resize(packetFrames * pcmChannels);
         if (pcmPacket.size() < pcmHeaderBytes + packetFrames * pcmChannels * 4)
@@ -1006,7 +1007,7 @@ WebRtcAudioSender::SendResult WebRtcAudioSender::sendPcmFrameLocked(const float*
     pcmPacket[5] = static_cast<uint8_t> (codecId);
     pcmPacket[6] = static_cast<uint8_t> (pcmChannels);
     pcmPacket[7] = static_cast<uint8_t> (pcmHeaderBytes);
-    writeU32Le(pcmPacket, 8, opusSampleRate);
+    writeU32Le(pcmPacket, 8, pcmTransportSampleRate);
     writeU32Le(pcmPacket, 12, static_cast<uint32_t> (pcmSequence & 0xffffffffu));
     writeU32Le(pcmPacket, 16, static_cast<uint32_t> (pcmSampleCursor & 0xffffffffu));
     writeU32Le(pcmPacket, 20, static_cast<uint32_t> ((pcmSampleCursor >> 32u) & 0xffffffffu));
@@ -1185,7 +1186,7 @@ size_t WebRtcAudioSender::opusFrameCount() const
 size_t WebRtcAudioSender::audioFrameCount() const
 {
     std::lock_guard<std::mutex> lock(mutex);
-    return config.usesPcmDataChannel() ? static_cast<size_t> (config.pcmPacketFrameCount()) : encoderFrameFrames;
+    return config.usesPcmDataChannel() ? static_cast<size_t> (config.pcmPacketFrameCount(pcmTransportSampleRate)) : encoderFrameFrames;
 }
 
 void WebRtcAudioSender::fillStats(StreamStats& stats) const
@@ -1232,8 +1233,11 @@ void WebRtcAudioSender::fillStats(StreamStats& stats) const
         stats.audioPassthrough = config.audioPassthrough;
         stats.serverScheme = config.serverScheme();
         stats.pcmBitsPerSample = config.usesPcmDataChannel() ? config.pcmBitsPerSample() : 0;
-        stats.pcmPacketFrames = config.pcmPacketFrameCount();
+        stats.pcmPacketFrames = config.pcmPacketFrameCount(pcmTransportSampleRate);
+        stats.pcmPacketDurationMs = config.pcmPacketDurationMs();
         stats.pcmTargetBufferMs = config.pcmTargetBufferMs();
+        stats.pcmResumeBufferMs = config.pcmResumeBufferMs();
+        stats.pcmRingCapacityMs = config.pcmRingCapacityMs();
         stats.webrtcPeerCount = static_cast<int> (peers.size());
         stats.webrtcOpenTracks = static_cast<int> (std::count_if(peers.begin(), peers.end(), [] (const auto& entry)
         {

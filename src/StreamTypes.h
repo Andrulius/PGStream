@@ -96,20 +96,50 @@ struct StreamConfig
 
     int pcmPacketFrameCount() const
     {
-        return 480;
+        return pcmPacketFrameCount(48000);
+    }
+
+    int pcmPacketFrameCount(int sampleRate) const
+    {
+        return framesForDurationMs(sampleRate, pcmPacketDurationMs());
+    }
+
+    int pcmPacketDurationMs() const
+    {
+        if (latencyMode == LatencyMode::medium)
+            return 20;
+        if (latencyMode == LatencyMode::safe)
+            return 40;
+        if (latencyMode == LatencyMode::verySafe)
+            return 100;
+        return 10;
     }
 
     int pcmTargetBufferMs() const
     {
-        if (latencyMode == LatencyMode::ultraLowExperimental)
-            return 20;
-        if (latencyMode == LatencyMode::lowLatency)
-            return 40;
         if (latencyMode == LatencyMode::medium)
-            return 70;
+            return 100;
         if (latencyMode == LatencyMode::safe)
-            return 120;
-        return 180;
+            return 180;
+        if (latencyMode == LatencyMode::verySafe)
+            return 300;
+        return 60;
+    }
+
+    int pcmResumeBufferMs() const
+    {
+        return pcmTargetBufferMs();
+    }
+
+    int pcmRingCapacityMs() const
+    {
+        if (latencyMode == LatencyMode::medium)
+            return 400;
+        if (latencyMode == LatencyMode::safe)
+            return 700;
+        if (latencyMode == LatencyMode::verySafe)
+            return 1000;
+        return 250;
     }
 
     juce::String serverScheme() const
@@ -182,15 +212,13 @@ struct StreamConfig
 
     juce::String latencyTargetDescription() const
     {
-        if (latencyMode == LatencyMode::ultraLowExperimental)
-            return "20 ms PCM target fill";
-        if (latencyMode == LatencyMode::lowLatency)
-            return "40 ms PCM target fill";
         if (latencyMode == LatencyMode::medium)
-            return "70 ms PCM target fill";
+            return "100 ms PCM target fill";
         if (latencyMode == LatencyMode::safe)
-            return "120 ms PCM target fill";
-        return "180 ms PCM target fill";
+            return "180 ms PCM target fill";
+        if (latencyMode == LatencyMode::verySafe)
+            return "300 ms PCM target fill";
+        return "60 ms PCM target fill";
     }
 
     int playoutDelayHintMs() const
@@ -211,6 +239,14 @@ struct StreamConfig
         if (latencyMode == LatencyMode::ultraLowExperimental)
             return 10;
         return 20;
+    }
+
+private:
+    static int framesForDurationMs(int sampleRate, int durationMs)
+    {
+        const auto safeRate = juce::jmax(1, sampleRate);
+        const auto safeMs = juce::jmax(1, durationMs);
+        return static_cast<int> ((static_cast<int64_t> (safeRate) * safeMs + 500) / 1000);
     }
 };
 
@@ -233,8 +269,11 @@ struct StreamStats
     bool selfSignedCertificateEnabled = true;
     bool audioPassthrough = true;
     int pcmBitsPerSample = 0;
-    int pcmPacketFrames = 480;
-    int pcmTargetBufferMs = 70;
+    int pcmPacketFrames = 960;
+    int pcmPacketDurationMs = 20;
+    int pcmTargetBufferMs = 100;
+    int pcmResumeBufferMs = 100;
+    int pcmRingCapacityMs = 400;
     int inputSampleRate = 48000;
     int selectedOpusBitrateBps = 320000;
     juce::String selectedOpusBitratePreset;

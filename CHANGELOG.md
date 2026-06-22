@@ -1,5 +1,49 @@
 # Changelog
 
+## PGStream 0.9 - PCM buffer and packet tuning - 2026-06-22
+
+Checkpoint:
+
+- Created Git checkpoint commit `9fc0004` with message `checkpoint: PCM working before buffer and packet tuning`.
+- Created tag `checkpoint-pcm-working-before-buffer-packet-tuning` at that checkpoint commit.
+
+Changed:
+
+- PCM packet duration now follows the active latency preset: Ultra Low/Low 10 ms, Medium 20 ms, Safe 40 ms, Very Safe 100 ms.
+- PCM sender packet frames are derived from packet duration and transport sample rate instead of staying fixed at 480 frames.
+- Browser PCM target/resume/ring buffers now follow the active latency preset: Ultra Low/Low 60/60/250 ms, Medium 100/100/400 ms, Safe 180/180/700 ms, Very Safe 300/300/1000 ms.
+- Browser playback now waits for the configured target buffer before starting, and after a real audio underrun it buffers until the configured resume threshold.
+- PCM missing sequence gaps now insert explicit silence for the missing packet duration before later packets are written.
+- AudioWorklet underruns are counted per callback that cannot be fully served, not per missing sample and not when the buffer is merely below target.
+- Plugin Nerd diagnostics now show PCM packet duration and target/resume/ring buffer configuration.
+- Plugin Nerd checkbox moved up under Always on top; LAN/status/client diagnostics are hidden unless Nerd is checked.
+- Plugin QR/certificate layout now uses the right-side space under the logo so the scan label and HTTPS certificate note are not clipped.
+
+Removed:
+
+- Removed browser PCM ring trimming that treated the target buffer as a maximum and advanced the read pointer to reduce latency.
+- Removed fixed 480-frame PCM packet validation in the browser receiver.
+- Removed always-visible plugin diagnostic text from the normal plugin view.
+
+Before:
+
+- PCM packets were always 10 ms / 480 frames at 48 kHz.
+- Browser target fill was smaller, target-only, and could be shortened by catch-up trimming.
+- Missing packet gaps were counted but later packets were written without inserting the missing timeline duration.
+- The AudioWorklet underflow counter could grow per missing frame.
+
+Now:
+
+- PCM packet headers still carry stream id, sequence, sample rate, channels, format, frame count, payload size, stream id, and flags.
+- The receiver uses each packet header frame count and sample rate for playback metrics and packet duration.
+- Missing audio remains explicit silence and increments missing/underrun counters; no concealment, interpolation, repetition, crossfade, time-stretching, resampling, or playback-rate adjustment was added.
+- Overflow handling is explicit: if the browser PCM ring reaches capacity, the ring is reset to buffering instead of silently chasing latency.
+
+Why:
+
+- Larger PCM packets for Medium/Safe/Very Safe reduce mobile browser DataChannel wakeups without changing PCM format quality.
+- The target buffer is now a safety reserve rather than a latency maximum, matching the studio-grade missing-packet-is-silence behavior.
+
 ## PGStream lossless PCM DataChannel and HTTPS secure-context support - version 0.8
 
 Files changed:

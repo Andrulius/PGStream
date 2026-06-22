@@ -413,7 +413,7 @@ void AboutPanel::paint(juce::Graphics& g)
     const juce::String copyright = juce::String::charToString(0x00a9) + " 2026 Aras Pigeon";
     const juce::String description = "Transparent VST3 for streaming audio from the DAW master bus, "
         "and other DAW buses if inserted there, to a browser over LAN.";
-    const juce::String text = juce::String("Version 0.8\n"
+    const juce::String text = juce::String("Version 0.9\n"
         "Author: Aras Pigeon\n\n"
     ) + description + "\n\n"
         + copyright + "\n"
@@ -598,12 +598,12 @@ PGStreamAudioProcessorEditor::PGStreamAudioProcessorEditor(PGStreamAudioProcesso
     qrWarningText.setMultiLine(true);
     qrWarningText.setScrollbarsShown(false);
     qrWarningText.setCaretVisible(false);
-    qrWarningText.setText("Local self-signed HTTPS certificate. Your browser may show a security warning. Check that the IP address matches this computer. Continue only if you trust this device and your LAN.", false);
+    qrWarningText.setText("Self-signed HTTPS. Browser may warn. Continue only when the IP matches this computer and you trust this LAN.", false);
     qrWarningText.setColour(juce::TextEditor::backgroundColourId, juce::Colours::transparentBlack);
     qrWarningText.setColour(juce::TextEditor::outlineColourId, juce::Colours::transparentBlack);
     qrWarningText.setColour(juce::TextEditor::focusedOutlineColourId, juce::Colours::transparentBlack);
     qrWarningText.setColour(juce::TextEditor::textColourId, juce::Colour(0xfff0d7a7));
-    qrWarningText.setFont(juce::Font(11.0f));
+    qrWarningText.setFont(juce::Font(10.5f));
 
     addAndMakeVisible(engineHintLabel);
     engineHintLabel.setText("Lossless PCM requires self-signed HTTPS. Enable it in Settings to use PCM16/PCM24/PCM32F.", juce::dontSendNotification);
@@ -744,19 +744,24 @@ void PGStreamAudioProcessorEditor::paint(juce::Graphics& g)
 void PGStreamAudioProcessorEditor::resized()
 {
     auto area = getLocalBounds().reduced(18);
-    const auto topArea = area.removeFromTop(206);
+    const auto topArea = area.removeFromTop(218);
     const auto logoSize = 142;
     const auto qrSizePx = 136;
     const auto logoX = topArea.getRight() - logoSize;
+    const auto logoBottom = topArea.getY() + logoSize;
     const auto qrX = logoX - 30 - qrSizePx;
     infoButton.setBounds(topArea.getX() + 2, topArea.getY() + 64, 24, 24);
     settingsButton.setBounds(infoButton.getRight() + 8, infoButton.getY(), 24, 24);
     keepAliveButton.setBounds(topArea.getX(), topArea.getY() + 96, 220, 24);
     audioPassthroughButton.setBounds(topArea.getX(), topArea.getY() + 122, 220, 24);
     alwaysOnTopButton.setBounds(topArea.getX(), topArea.getY() + 148, 220, 24);
+    nerdButton.setBounds(topArea.getX(), topArea.getY() + 174, 90, 24);
     qrCodeImage.setBounds(qrX, topArea.getY(), qrSizePx, qrSizePx);
     qrCodeLabel.setBounds(qrX, qrCodeImage.getBottom() + 4, qrSizePx, 24);
-    qrWarningText.setBounds(qrX - 8, qrCodeLabel.getBottom() + 2, qrSizePx + 16, 48);
+    qrWarningText.setBounds(logoX - 4,
+                            logoBottom + 5,
+                            logoSize + 8,
+                            juce::jmax(44, topArea.getBottom() - logoBottom - 5));
 
     area.removeFromTop(2);
 
@@ -787,20 +792,19 @@ void PGStreamAudioProcessorEditor::resized()
 
     area.removeFromTop(10);
 
-    urlLabel.setBounds(area.removeFromTop(28));
-    statusLabel.setBounds(area.removeFromTop(42));
-    clientsLabel.setBounds(area.removeFromTop(22));
-
-    area.removeFromTop(6);
-    nerdButton.setBounds(area.removeFromTop(28).removeFromLeft(90));
-
     const auto nerdVisible = nerdButton.getToggleState();
+    urlLabel.setVisible(nerdVisible);
+    statusLabel.setVisible(nerdVisible);
+    clientsLabel.setVisible(nerdVisible);
     countersLabel.setVisible(nerdVisible);
     candidateUrlsLabel.setVisible(nerdVisible);
 
-    area.removeFromTop(6);
     if (nerdVisible)
     {
+        urlLabel.setBounds(area.removeFromTop(28));
+        statusLabel.setBounds(area.removeFromTop(42));
+        clientsLabel.setBounds(area.removeFromTop(22));
+        area.removeFromTop(6);
         countersLabel.setBounds(area.removeFromTop(128));
         candidateUrlsLabel.setBounds(area.removeFromTop(74));
         area.removeFromTop(8);
@@ -852,6 +856,7 @@ void PGStreamAudioProcessorEditor::timerCallback()
                               + "    DC queued: " + juce::String(static_cast<int64_t> (stats.pcmDataChannelBufferedBytes)) + " bytes"
                               + "    Dropped before send: " + juce::String(stats.pcmDroppedBeforeSend)
                               + "\nPCM stream: " + juce::String(stats.pcmPacketFrames) + " frames/packet"
+                              + " (" + juce::String(stats.pcmPacketDurationMs) + " ms)"
                               + "    AudioContext: " + (stats.pcmAudioContextSampleRate > 0.0 ? juce::String(stats.pcmAudioContextSampleRate, 0) + " Hz" : "unknown")
                               + "    base/output: " + juce::String(stats.pcmAudioContextBaseLatencyMs, 2)
                               + "/" + juce::String(stats.pcmAudioContextOutputLatencyMs, 2) + " ms"
@@ -861,8 +866,10 @@ void PGStreamAudioProcessorEditor::timerCallback()
                               + "    PCM packets/bytes/fail: " + juce::String(stats.pcmPacketsSent)
                               + "/" + juce::String(stats.pcmBytesSent)
                               + "/" + juce::String(stats.pcmSendFailures)
-                              + "\nPCM buffer/target/underruns: " + juce::String(stats.pcmReceiverBufferMs, 1)
+                              + "\nPCM buffer target/resume/ring/underruns: " + juce::String(stats.pcmReceiverBufferMs, 1)
                               + "/" + juce::String(stats.pcmTargetBufferMs)
+                              + "/" + juce::String(stats.pcmResumeBufferMs)
+                              + "/" + juce::String(stats.pcmRingCapacityMs)
                               + " ms / " + juce::String(stats.pcmReceiverUnderflows)
                               + "    Secure context: browser Stats",
                           juce::dontSendNotification);

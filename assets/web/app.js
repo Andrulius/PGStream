@@ -86,9 +86,7 @@ const autoStatsUnavailableMs = 10000;
 const bitrateProfiles = [510000, 320000, 256000, 192000, 128000];
 const latencyProfiles = ["ultra", "low", "medium", "safe", "very-safe"];
 const pcmEngineOrder = ["pcm32f", "pcm24", "pcm16", "opus"];
-const pcmPacketFrames = 480;
-const pcmSampleRate = 48000;
-const pcmRingCapacityFrames = pcmSampleRate;
+const defaultPcmSampleRate = 48000;
 const autoMaxProfiles = pcmEngineOrder.length * latencyProfiles.length;
 
 let socket = null;
@@ -163,8 +161,11 @@ const server = {
   httpsEnabled: false,
   selfSignedCertificateEnabled: false,
   pcmBitsPerSample: 0,
-  pcmPacketFrames: 480,
-  pcmTargetBufferMs: 70,
+  pcmPacketFrames: 960,
+  pcmPacketDurationMs: 20,
+  pcmTargetBufferMs: 100,
+  pcmResumeBufferMs: 100,
+  pcmRingCapacityMs: 400,
   pcmOpenChannels: 0,
   pcmReceiverReadyCount: 0,
   pcmPacketsSent: 0,
@@ -200,10 +201,14 @@ const pcm = {
   ringLeft: null,
   ringRight: null,
   ringCapacityFrames: 0,
-  targetBufferMs: 70,
+  targetBufferMs: 100,
+  resumeBufferMs: 100,
+  ringCapacityMs: 400,
+  targetBufferFrames: 4800,
+  resumeBufferFrames: 4800,
   sampleRate: 48000,
-  packetFrames: 480,
-  packetDurationMs: 10,
+  packetFrames: 960,
+  packetDurationMs: 20,
   streamId: null,
   lastAcceptedSequence: null,
   packetsReceived: 0,
@@ -303,9 +308,14 @@ function resetPcmReceiver() {
   pcm.ringLeft = null;
   pcm.ringRight = null;
   pcm.ringCapacityFrames = 0;
-  pcm.sampleRate = 48000;
-  pcm.packetFrames = 480;
-  pcm.packetDurationMs = 10;
+  pcm.sampleRate = defaultPcmSampleRate;
+  pcm.targetBufferMs = pcmTargetFillMsForLatency(activeProfile.latencyValue);
+  pcm.resumeBufferMs = pcmResumeFillMsForLatency(activeProfile.latencyValue);
+  pcm.ringCapacityMs = pcmRingCapacityMsForLatency(activeProfile.latencyValue);
+  pcm.targetBufferFrames = framesFromMs(pcmSampleRateForBuffers(), pcm.targetBufferMs);
+  pcm.resumeBufferFrames = framesFromMs(pcmSampleRateForBuffers(), pcm.resumeBufferMs);
+  pcm.packetDurationMs = pcmPacketDurationMsForLatency(activeProfile.latencyValue);
+  pcm.packetFrames = framesFromMs(pcmSampleRateForBuffers(), pcm.packetDurationMs);
   pcm.streamId = null;
   pcm.lastAcceptedSequence = null;
   pcm.packetsReceived = 0;
@@ -370,20 +380,57 @@ function latencyLabel(value) {
 }
 
 function latencyTarget(value) {
-  if (value === "ultra") return "20 ms PCM target fill";
-  if (value === "low") return "40 ms PCM target fill";
-  if (value === "medium") return "70 ms PCM target fill";
-  if (value === "safe") return "120 ms PCM target fill";
-  if (value === "very-safe") return "180 ms PCM target fill";
-  return "70 ms PCM target fill";
+  return `${pcmLatencyConfig(value).targetBufferMs} ms PCM target fill`;
+}
+
+function pcmLatencyConfig(value) {
+  const normalized = normalizeLatencyValue(value);
+  if (normalized === "medium") {
+    return {
+      packetDurationMs: 20,
+      targetBufferMs: 100,
+      resumeBufferMs: 100,
+      ringCapacityMs: 400
+    };
+  }
+  if (normalized === "safe") {
+    return {
+      packetDurationMs: 40,
+      targetBufferMs: 180,
+      resumeBufferMs: 180,
+      ringCapacityMs: 700
+    };
+  }
+  if (normalized === "very-safe") {
+    return {
+      packetDurationMs: 100,
+      targetBufferMs: 300,
+      resumeBufferMs: 300,
+      ringCapacityMs: 1000
+    };
+  }
+  return {
+    packetDurationMs: 10,
+    targetBufferMs: 60,
+    resumeBufferMs: 60,
+    ringCapacityMs: 250
+  };
 }
 
 function pcmTargetFillMsForLatency(value) {
-  if (value === "ultra") return 20;
-  if (value === "low") return 40;
-  if (value === "safe") return 120;
-  if (value === "very-safe") return 180;
-  return 70;
+  return pcmLatencyConfig(value).targetBufferMs;
+}
+
+function pcmResumeFillMsForLatency(value) {
+  return pcmLatencyConfig(value).resumeBufferMs;
+}
+
+function pcmRingCapacityMsForLatency(value) {
+  return pcmLatencyConfig(value).ringCapacityMs;
+}
+
+function pcmPacketDurationMsForLatency(value) {
+  return pcmLatencyConfig(value).packetDurationMs;
 }
 
 function latencyFrameMs(value) {
@@ -528,7 +575,7 @@ function setActiveProfile(profile, options = {}) {
     profile.latencyTarget,
     profile.opusFrameDurationMs
   );
-  pcm.targetBufferMs = pcmTargetFillMsForLatency(activeProfile.latencyValue);
+  applyPcmLatencyConfig(activeProfile.latencyValue);
 
   if (options.updateControls !== false) {
     setControlsFromProfile(activeProfile);
@@ -970,10 +1017,27 @@ function applyInfo(info) {
     server.selfSignedCertificateEnabled = info.selfSignedCertificateEnabled;
   }
   if (Number.isFinite(Number(info.pcmBitsPerSample))) server.pcmBitsPerSample = Number(info.pcmBitsPerSample);
-  if (Number.isFinite(Number(info.pcmPacketFrames))) server.pcmPacketFrames = Number(info.pcmPacketFrames);
+  if (Number.isFinite(Number(info.pcmPacketFrames))) {
+    server.pcmPacketFrames = Number(info.pcmPacketFrames);
+    if (pcm.packetsReceived === 0) pcm.packetFrames = server.pcmPacketFrames;
+  }
+  if (Number.isFinite(Number(info.pcmPacketDurationMs))) {
+    server.pcmPacketDurationMs = Number(info.pcmPacketDurationMs);
+    if (pcm.packetsReceived === 0) pcm.packetDurationMs = server.pcmPacketDurationMs;
+  }
   if (Number.isFinite(Number(info.pcmTargetBufferMs))) {
     server.pcmTargetBufferMs = Number(info.pcmTargetBufferMs);
     pcm.targetBufferMs = server.pcmTargetBufferMs;
+    pcm.targetBufferFrames = framesFromMs(pcmSampleRateForBuffers(), pcm.targetBufferMs);
+  }
+  if (Number.isFinite(Number(info.pcmResumeBufferMs))) {
+    server.pcmResumeBufferMs = Number(info.pcmResumeBufferMs);
+    pcm.resumeBufferMs = server.pcmResumeBufferMs;
+    pcm.resumeBufferFrames = framesFromMs(pcmSampleRateForBuffers(), pcm.resumeBufferMs);
+  }
+  if (Number.isFinite(Number(info.pcmRingCapacityMs))) {
+    server.pcmRingCapacityMs = Number(info.pcmRingCapacityMs);
+    pcm.ringCapacityMs = server.pcmRingCapacityMs;
   }
   if (info.opusBitrateBps) server.opusBitrateBps = Number(info.opusBitrateBps);
   if (info.opusBitratePreset) server.opusBitratePreset = info.opusBitratePreset;
@@ -1033,6 +1097,9 @@ function applyInfo(info) {
     server.pcmSendFailures = Number(info.server.pcmSendFailures || 0);
     server.pcmDroppedBeforeSend = Number(info.server.pcmDroppedBeforeSend || 0);
     server.pcmDataChannelBufferedBytes = Number(info.server.pcmDataChannelBufferedBytes || 0);
+    server.pcmPacketDurationMs = Number(info.server.pcmPacketDurationMs || server.pcmPacketDurationMs);
+    server.pcmResumeBufferMs = Number(info.server.pcmResumeBufferMs || server.pcmResumeBufferMs);
+    server.pcmRingCapacityMs = Number(info.server.pcmRingCapacityMs || server.pcmRingCapacityMs);
     server.pcmReceiverAckAgeMs = Number(info.server.pcmReceiverAckAgeMs ?? -1);
     server.pcmReceiverBufferMs = Number(info.server.pcmReceiverBufferMs || 0);
     server.pcmReceiverUnderflows = Number(info.server.pcmReceiverUnderflows || 0);
@@ -1078,6 +1145,11 @@ function applyStateUpdate(message) {
   server.latencyPreset = message.activeLatencyMode || server.latencyPreset;
   server.opusFrameDurationMs = Number(message.activeFrameDurationMs || server.opusFrameDurationMs);
   server.activePlayoutDelayHintMs = Number(message.activePlayoutDelayHintMs || server.activePlayoutDelayHintMs);
+  if (Number.isFinite(Number(message.pcmPacketFrames))) server.pcmPacketFrames = Number(message.pcmPacketFrames);
+  if (Number.isFinite(Number(message.pcmPacketDurationMs))) server.pcmPacketDurationMs = Number(message.pcmPacketDurationMs);
+  if (Number.isFinite(Number(message.pcmTargetBufferMs))) server.pcmTargetBufferMs = Number(message.pcmTargetBufferMs);
+  if (Number.isFinite(Number(message.pcmResumeBufferMs))) server.pcmResumeBufferMs = Number(message.pcmResumeBufferMs);
+  if (Number.isFinite(Number(message.pcmRingCapacityMs))) server.pcmRingCapacityMs = Number(message.pcmRingCapacityMs);
   server.lastAdaptationReason = message.lastAdaptationReason || server.lastAdaptationReason;
   server.lastAdaptationTimestamp = message.lastAdaptationTimestamp || server.lastAdaptationTimestamp;
 
@@ -1217,12 +1289,108 @@ function pcmBufferFrames() {
   return pcm.bufferFrames;
 }
 
+function pcmSampleRateForBuffers() {
+  const rate = Number(pcm.audioContextSampleRate || pcm.sampleRate || defaultPcmSampleRate);
+  return Number.isFinite(rate) && rate > 0 ? Math.round(rate) : defaultPcmSampleRate;
+}
+
+function framesFromMs(sampleRate, durationMs) {
+  const rate = Number.isFinite(Number(sampleRate)) && Number(sampleRate) > 0
+    ? Number(sampleRate)
+    : defaultPcmSampleRate;
+  const ms = Number.isFinite(Number(durationMs)) && Number(durationMs) > 0
+    ? Number(durationMs)
+    : 1;
+  return Math.max(1, Math.round((rate * ms) / 1000));
+}
+
 function pcmBufferMs() {
-  return (pcmBufferFrames() / pcmSampleRate) * 1000;
+  return (pcmBufferFrames() / pcmSampleRateForBuffers()) * 1000;
 }
 
 function targetFillFrames() {
-  return Math.max(128, Math.round((pcm.targetBufferMs / 1000) * pcmSampleRate));
+  return Math.max(128, pcm.targetBufferFrames || framesFromMs(pcmSampleRateForBuffers(), pcm.targetBufferMs));
+}
+
+function resumeFillFrames() {
+  return Math.max(128, pcm.resumeBufferFrames || framesFromMs(pcmSampleRateForBuffers(), pcm.resumeBufferMs));
+}
+
+function ringCapacityFramesForCurrentProfile() {
+  return Math.max(
+    targetFillFrames() + 128,
+    framesFromMs(pcmSampleRateForBuffers(), pcm.ringCapacityMs)
+  );
+}
+
+function postPcmWorkletConfig() {
+  if (!pcmWorkletNode) return;
+  pcmWorkletNode.port.postMessage({
+    type: "set-buffer-config",
+    targetBufferFrames: targetFillFrames(),
+    resumeBufferFrames: resumeFillFrames(),
+    sampleRate: pcmSampleRateForBuffers()
+  });
+}
+
+function clearPcmRing() {
+  if (pcm.header) {
+    Atomics.store(pcm.header, 0, 0);
+    Atomics.store(pcm.header, 1, 0);
+    Atomics.store(pcm.header, 3, 0);
+  }
+  pcm.bufferFrames = 0;
+}
+
+function configurePcmRingBuffer() {
+  if (!pcmWorkletNode || !pcm.sabAvailable || !pcm.crossOriginIsolated) return false;
+
+  const capacityFrames = ringCapacityFramesForCurrentProfile();
+  const headerBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 4);
+  const leftBuffer = new SharedArrayBuffer(Float32Array.BYTES_PER_ELEMENT * capacityFrames);
+  const rightBuffer = new SharedArrayBuffer(Float32Array.BYTES_PER_ELEMENT * capacityFrames);
+  pcm.header = new Int32Array(headerBuffer);
+  pcm.ringLeft = new Float32Array(leftBuffer);
+  pcm.ringRight = new Float32Array(rightBuffer);
+  pcm.ringCapacityFrames = capacityFrames;
+  Atomics.store(pcm.header, 0, 0);
+  Atomics.store(pcm.header, 1, 0);
+  Atomics.store(pcm.header, 2, capacityFrames);
+  Atomics.store(pcm.header, 3, 0);
+  pcmWorkletNode.port.postMessage({
+    type: "configure-sab",
+    header: headerBuffer,
+    left: leftBuffer,
+    right: rightBuffer,
+    targetBufferFrames: targetFillFrames(),
+    resumeBufferFrames: resumeFillFrames(),
+    sampleRate: pcmSampleRateForBuffers()
+  });
+  pcm.ringBufferReady = true;
+  pcm.state = pcm.audioWorkletProcessorReady ? "WORKLET_READY" : pcm.state;
+  return true;
+}
+
+function applyPcmLatencyConfig(latencyValue) {
+  const config = pcmLatencyConfig(latencyValue);
+  pcm.targetBufferMs = config.targetBufferMs;
+  pcm.resumeBufferMs = config.resumeBufferMs;
+  pcm.ringCapacityMs = config.ringCapacityMs;
+  pcm.targetBufferFrames = framesFromMs(pcmSampleRateForBuffers(), pcm.targetBufferMs);
+  pcm.resumeBufferFrames = framesFromMs(pcmSampleRateForBuffers(), pcm.resumeBufferMs);
+  pcm.packetDurationMs = config.packetDurationMs;
+  pcm.packetFrames = framesFromMs(pcmSampleRateForBuffers(), pcm.packetDurationMs);
+
+  if (pcm.header && pcmWorkletNode) {
+    const nextCapacity = ringCapacityFramesForCurrentProfile();
+    if (nextCapacity !== pcm.ringCapacityFrames) {
+      configurePcmRingBuffer();
+      pcm.state = "BUFFERING";
+      pcm.lastReason = "PCM latency preset changed; ring reconfigured";
+    } else {
+      postPcmWorkletConfig();
+    }
+  }
 }
 
 function resetPcmStream(streamId) {
@@ -1232,30 +1400,25 @@ function resetPcmStream(streamId) {
   pcm.latePackets = 0;
   pcm.overflows = 0;
   pcm.bufferFrames = 0;
-  if (pcm.header) {
-    Atomics.store(pcm.header, 0, 0);
-    Atomics.store(pcm.header, 1, 0);
-    Atomics.store(pcm.header, 3, 0);
-  }
+  clearPcmRing();
   if (pcmWorkletNode) {
     pcmWorkletNode.port.postMessage({ type: "reset" });
+    postPcmWorkletConfig();
   }
-  pcm.state = "PREROLLING";
+  pcm.state = "BUFFERING";
 }
 
-function trimPcmRingToTarget(write, read, capacity) {
-  let available = Math.max(0, write - read);
-  const maxFill = Math.min(capacity, Math.max(targetFillFrames() * 2, targetFillFrames() + pcmPacketFrames));
-  if (available <= maxFill) return read;
-
-  const dropFrames = available - maxFill;
-  read += dropFrames;
-  Atomics.store(pcm.header, 1, read);
+function resetPcmRingAfterOverflow() {
   pcm.overflows += 1;
-  return read;
+  clearPcmRing();
+  if (pcmWorkletNode) {
+    pcmWorkletNode.port.postMessage({ type: "set-running", running: false });
+  }
+  pcm.state = "BUFFERING";
+  pcm.lastReason = "PCM ring overflow; reset to buffering";
 }
 
-function writePcmSamples(left, right, frames) {
+function writePcmFrames(left, right, frames) {
   if (pcm.header && pcm.ringLeft && pcm.ringRight) {
     let write = Atomics.load(pcm.header, 0);
     let read = Atomics.load(pcm.header, 1);
@@ -1264,24 +1427,21 @@ function writePcmSamples(left, right, frames) {
     const needed = Math.floor(frames);
 
     if (needed > capacity) {
-      pcm.overflows += 1;
+      resetPcmRingAfterOverflow();
       return false;
     }
 
-    read = trimPcmRingToTarget(write, read, capacity);
-    available = Math.max(0, write - read);
-
-    while (capacity - available < needed) {
-      read += Math.min(needed, available);
-      Atomics.store(pcm.header, 1, read);
+    if (capacity - available < needed) {
+      resetPcmRingAfterOverflow();
+      write = Atomics.load(pcm.header, 0);
+      read = Atomics.load(pcm.header, 1);
       available = Math.max(0, write - read);
-      pcm.overflows += 1;
     }
 
     for (let i = 0; i < needed; i += 1) {
       const frame = (write + i) % capacity;
-      pcm.ringLeft[frame] = left[i];
-      pcm.ringRight[frame] = right[i];
+      pcm.ringLeft[frame] = left ? left[i] : 0;
+      pcm.ringRight[frame] = right ? right[i] : 0;
     }
     Atomics.store(pcm.header, 0, write + needed);
     pcm.bufferFrames = pcmBufferFrames();
@@ -1291,13 +1451,18 @@ function writePcmSamples(left, right, frames) {
   return false;
 }
 
+function writePcmSilence(frames) {
+  return writePcmFrames(null, null, frames);
+}
+
 function maybeStartPcmPlayback() {
-  if ((pcm.state === "PREROLLING" || pcm.state === "WORKLET_READY" || pcm.state === "UNDERFLOW")
-      && pcmBufferFrames() >= targetFillFrames()
+  const requiredFrames = pcm.state === "BUFFERING" ? resumeFillFrames() : targetFillFrames();
+  if ((pcm.state === "BUFFERING" || pcm.state === "WORKLET_READY")
+      && pcmBufferFrames() >= requiredFrames
       && pcmWorkletNode
       && pcmAudioContext
       && pcmAudioContext.state === "running") {
-    pcm.state = "RUNNING";
+    pcm.state = "PLAYING";
     pcmWorkletNode.port.postMessage({ type: "set-running", running: true });
     setStatus("playing");
   }
@@ -1342,9 +1507,10 @@ function decodePcmPacket(buffer) {
   const flags = readU32(view, 36);
   const bytesPerSample = format === 1 ? 2 : (format === 2 ? 3 : 4);
   const expectedPayloadBytes = frames * channels * bytesPerSample;
+  const expectedSampleRate = pcmSampleRateForBuffers();
 
-  if (version !== 1 || format !== pcmFormatCode() || sampleRate !== 48000 || channels !== 2
-      || headerBytes !== 40 || frames !== pcmPacketFrames
+  if (version !== 1 || format !== pcmFormatCode() || sampleRate !== expectedSampleRate || channels !== 2
+      || headerBytes !== 40 || frames <= 0
       || payloadBytes !== expectedPayloadBytes
       || buffer.byteLength !== headerBytes + payloadBytes) {
     pcm.droppedInvalid += 1;
@@ -1386,6 +1552,7 @@ function decodePcmPacket(buffer) {
   return {
     streamId,
     sequence,
+    sampleRate,
     sampleTime: readU64PartsAsNumber(sampleTimeLow, sampleTimeHigh),
     frames,
     left,
@@ -1408,20 +1575,30 @@ function handlePcmData(buffer) {
     return;
   }
 
-  if (pcm.lastAcceptedSequence !== null && packet.sequence > pcm.lastAcceptedSequence + 1) {
-    pcm.missingPackets += packet.sequence - pcm.lastAcceptedSequence - 1;
+  if (packet.sampleRate !== pcm.sampleRate) {
+    pcm.sampleRate = packet.sampleRate;
+    applyPcmLatencyConfig(activeProfile.latencyValue);
   }
 
-  if (writePcmSamples(packet.left, packet.right, packet.frames)) {
+  if (pcm.lastAcceptedSequence !== null && packet.sequence > pcm.lastAcceptedSequence + 1) {
+    const missing = packet.sequence - pcm.lastAcceptedSequence - 1;
+    pcm.missingPackets += missing;
+    for (let i = 0; i < missing; i += 1) {
+      writePcmSilence(packet.frames);
+    }
+    pcm.lastReason = `${missing} missing PCM packet${missing === 1 ? "" : "s"} inserted as silence`;
+  }
+
+  if (writePcmFrames(packet.left, packet.right, packet.frames)) {
     pcm.lastAcceptedSequence = packet.sequence;
     if ((packet.flags & (1 << 3)) !== 0) {
       pcm.lastReason = "sender dropped old audio before this packet";
     } else if ((packet.flags & (1 << 2)) !== 0) {
       pcm.lastReason = "sender discontinuity";
     }
-    pcm.sampleRate = pcmSampleRate;
+    pcm.sampleRate = packet.sampleRate;
     pcm.packetFrames = packet.frames;
-    pcm.packetDurationMs = (packet.frames / pcmSampleRate) * 1000;
+    pcm.packetDurationMs = (packet.frames / packet.sampleRate) * 1000;
     pcm.packetsReceived += 1;
     pcm.bytesReceived += packet.bytes;
     pcm.lastPacketAt = performance.now();
@@ -1447,6 +1624,9 @@ function sendPcmReceiverStats() {
     currentEngine: transportModeForEngine(),
     streamId: pcm.streamId || 0,
     bufferMs: pcmBufferMs(),
+    targetBufferMs: pcm.targetBufferMs,
+    resumeBufferMs: pcm.resumeBufferMs,
+    ringCapacityFrames: pcm.ringCapacityFrames,
     underflows: pcm.underflows,
     overflows: pcm.overflows,
     missingPackets: pcm.missingPackets,
@@ -1491,6 +1671,8 @@ async function setupPcmAudio() {
   if (Math.round(pcmAudioContext.sampleRate) !== 48000) {
     throw new Error(`PCM playback requires a 48 kHz AudioContext; browser opened ${pcmAudioContext.sampleRate} Hz.`);
   }
+  pcm.sampleRate = Math.round(pcmAudioContext.sampleRate);
+  applyPcmLatencyConfig(activeProfile.latencyValue);
 
   pcm.audioWorkletAvailable = !!pcmAudioContext.audioWorklet;
   if (!pcm.audioWorkletAvailable) {
@@ -1512,14 +1694,23 @@ async function setupPcmAudio() {
       if (message.type === "processor-ready") {
         pcm.audioWorkletProcessorReady = true;
         pcm.usingSab = !!message.usingSab;
-        pcm.state = "WORKLET_READY";
+        if (pcm.state !== "BUFFERING" && pcm.state !== "PLAYING") {
+          pcm.state = "WORKLET_READY";
+        }
         resolve();
       } else if (message.type === "processor-stats") {
-        pcm.underflows = Number(message.underflows || 0);
-        pcm.bufferFrames = Number(message.bufferFrames || pcm.bufferFrames || 0);
-        if (pcm.state === "RUNNING" && pcm.bufferFrames === 0 && pcm.underflows > 0) {
-          pcm.state = "UNDERFLOW";
+        const nextUnderflows = Number(message.underflows || 0);
+        if (nextUnderflows > pcm.underflows) {
+          pcm.lastReason = "PCM audio underrun; buffering until resume threshold";
         }
+        pcm.underflows = nextUnderflows;
+        pcm.bufferFrames = Number(message.bufferFrames || pcm.bufferFrames || 0);
+        if (message.playbackState === "buffering" && pcm.state === "PLAYING") {
+          pcm.state = "BUFFERING";
+        } else if (message.playbackState === "playing" && pcm.state !== "IDLE" && pcm.state !== "FAILED") {
+          pcm.state = "PLAYING";
+        }
+        maybeStartPcmPlayback();
       }
     };
   });
@@ -1528,27 +1719,10 @@ async function setupPcmAudio() {
   if (!canUseSab) {
     throw new Error("PCM playback requires SharedArrayBuffer/cross-origin isolation for the browser playback ring.");
   }
-  pcm.ringCapacityFrames = pcmRingCapacityFrames;
-  const headerBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 4);
-  const leftBuffer = new SharedArrayBuffer(Float32Array.BYTES_PER_ELEMENT * pcm.ringCapacityFrames);
-  const rightBuffer = new SharedArrayBuffer(Float32Array.BYTES_PER_ELEMENT * pcm.ringCapacityFrames);
-  pcm.header = new Int32Array(headerBuffer);
-  pcm.ringLeft = new Float32Array(leftBuffer);
-  pcm.ringRight = new Float32Array(rightBuffer);
-  Atomics.store(pcm.header, 0, 0);
-  Atomics.store(pcm.header, 1, 0);
-  Atomics.store(pcm.header, 2, pcm.ringCapacityFrames);
-  Atomics.store(pcm.header, 3, 0);
-  pcmWorkletNode.port.postMessage({
-    type: "configure-sab",
-    header: headerBuffer,
-    left: leftBuffer,
-    right: rightBuffer
-  });
+  configurePcmRingBuffer();
 
   pcmWorkletNode.connect(pcmAudioContext.destination);
   await ready;
-  pcm.ringBufferReady = true;
 }
 
 function configurePcmDataChannel(channel) {
