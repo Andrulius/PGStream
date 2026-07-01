@@ -89,6 +89,88 @@ const pcmEngineOrder = ["pcm32f", "pcm24", "pcm16", "opus"];
 const defaultPcmSampleRate = 48000;
 const autoMaxProfiles = pcmEngineOrder.length * latencyProfiles.length;
 
+function withForcedOpusStereoSdp(sdp, bitrateBps) {
+  if (typeof sdp !== "string" || !sdp) return sdp;
+
+  const lines = sdp.split(/\r\n|\n/);
+  let inAudioSection = false;
+  const opusPayloadTypes = [];
+
+  for (const line of lines) {
+    if (line.startsWith("m=")) {
+      inAudioSection = line.startsWith("m=audio ");
+      continue;
+    }
+
+    if (!inAudioSection) continue;
+
+    const match = line.match(/^a=rtpmap:(\d+)\s+opus\/48000(?:\/2)?$/i);
+    if (match && !opusPayloadTypes.includes(match[1])) {
+      opusPayloadTypes.push(match[1]);
+    }
+  }
+
+  if (opusPayloadTypes.length === 0) return sdp;
+
+  const forcedParams = [
+    "stereo=1",
+    "sprop-stereo=1",
+    `maxaveragebitrate=${Math.max(6000, Math.round(Number(bitrateBps) || 320000))}`,
+    "useinbandfec=0",
+    "usedtx=0"
+  ];
+
+  let activeAudioSection = false;
+  let insertAt = -1;
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (line.startsWith("m=")) {
+      if (activeAudioSection && insertAt === -1) {
+        insertAt = i;
+      }
+      activeAudioSection = line.startsWith("m=audio ");
+      continue;
+    }
+
+    if (!activeAudioSection) continue;
+
+    const fmtpMatch = line.match(/^a=fmtp:(\d+)\s+(.*)$/i);
+    if (!fmtpMatch || !opusPayloadTypes.includes(fmtpMatch[1])) continue;
+
+    const params = fmtpMatch[2]
+      .split(";")
+      .map((part) => part.trim())
+      .filter(Boolean);
+
+    for (const forced of forcedParams) {
+      const key = forced.split("=")[0];
+      const existingIndex = params.findIndex((part) => part.split("=")[0].trim().toLowerCase() === key.toLowerCase());
+      if (existingIndex >= 0) {
+        params[existingIndex] = forced;
+      } else {
+        params.push(forced);
+      }
+    }
+
+    lines[i] = `a=fmtp:${fmtpMatch[1]} ${params.join(";")}`;
+  }
+
+  if (insertAt === -1) {
+    insertAt = lines.length;
+  }
+
+  for (const payloadType of opusPayloadTypes) {
+    const hasFmtp = lines.some((line) => new RegExp(`^a=fmtp:${payloadType}\\s`, "i").test(line));
+    if (!hasFmtp) {
+      lines.splice(insertAt, 0, `a=fmtp:${payloadType} ${forcedParams.join(";")}`);
+      insertAt += 1;
+    }
+  }
+
+  return `${lines.join("\r\n")}\r\n`;
+}
+
 let socket = null;
 let pc = null;
 let remoteStream = null;
@@ -1831,7 +1913,11 @@ async function startOpusWebRtc() {
   signaling.onopen = async () => {
     setStatus("signaling");
     const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
+    const forcedStereoOffer = {
+      type: offer.type,
+      sdp: withForcedOpusStereoSdp(offer.sdp, activeProfile.bitrateBps)
+    };
+    await pc.setLocalDescription(forcedStereoOffer);
     sendJson({
       type: "webrtc-offer",
       sdpType: pc.localDescription.type,
